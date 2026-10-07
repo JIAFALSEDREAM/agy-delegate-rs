@@ -828,3 +828,117 @@ impl Jobs {
         self.save(&job)
     }
 }
+
+#[cfg(all(test, unix))]
+mod cleanup_concurrency {
+    use super::*;
+    #[test]
+    fn removal_uses_the_verified_handle_after_job_directory_substitution() {
+        let state = tempfile::tempdir().unwrap();
+        let jobs = Jobs::new(Config {
+            state_dir: Some(state.path().into()),
+            ..Config::default()
+        })
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = jobs.state.join("jobs").join(&id);
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("old.log"), "expired").unwrap();
+        let data = json!({"id":id,"root_id":id,"status":"succeeded","local_log_dir":dir});
+        jobs.db()
+            .unwrap()
+            .execute(
+                "INSERT INTO jobs VALUES(?1,?1,'succeeded',0,?2)",
+                params![id, data.to_string()],
+            )
+            .unwrap();
+        let moved = jobs.state.join("jobs").join("renamed");
+        let result = jobs
+            .cleanup_using(false, |child, _| {
+                // Removing the per-job lock must not let a second cleaner take over.
+                fs::remove_file(dir.join("owner.lock"))?;
+                let competing = jobs.cleanup(false).unwrap();
+                assert_eq!(competing["skipped"][0]["reason"], "cleanup_active");
+                assert_eq!(jobs.get(&id).unwrap()["status"], "purging");
+                fs::rename(&dir, &moved)?;
+                fs::create_dir(&dir)?;
+                fs::write(dir.join("replacement.log"), "must survive")?;
+                Jobs::remove_logs(child.unwrap())
+            })
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            fs::read_to_string(dir.join("replacement.log")).unwrap(),
+            "must survive"
+        );
+        assert!(!moved.exists());
+        assert!(jobs.get(&id).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_log_removal_preserves_a_running_worker_and_blocks_followup() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = state.path().join("backend");
+        fs::write(&backend, "#!/bin/sh\ncat >/dev/null\nsleep 7\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"complete\"}}'\n").unwrap();
+        fs::set_permissions(&backend, fs::Permissions::from_mode(0o700)).unwrap();
+        let jobs = Jobs::new(Config {
+            codex: backend,
+            state_dir: Some(state.path().into()),
+            timeout: 20,
+            ..Config::default()
+        })
+        .unwrap();
+        let old = uuid::Uuid::new_v4().to_string();
+        let running = uuid::Uuid::new_v4().to_string();
+        for (id, status, updated) in [(&old, "succeeded", 0.0), (&running, "starting", now())] {
+            let dir = jobs.state.join("jobs").join(id);
+            fs::create_dir_all(&dir).unwrap();
+            let data = json!({"id":id,"root_id":id,"status":status,"created":updated,"config":jobs.config,"task":"inspect","cwd":repo.path(),"local_log_dir":dir,"conversation":"fixture"});
+            jobs.db()
+                .unwrap()
+                .execute(
+                    "INSERT INTO jobs VALUES(?1,?1,?2,?3,?4)",
+                    params![id, status, updated, data.to_string()],
+                )
+                .unwrap();
+        }
+        let worker_jobs = jobs.clone();
+        let worker_id = running.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(worker_jobs.worker(&worker_id))
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while jobs.get(&running).unwrap()["status"] != "running" {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let before = jobs.get(&running).unwrap()["updated"].as_f64().unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let cleaner = jobs.clone();
+        let cleanup = tokio::task::spawn_blocking(move || {
+            let mut ready = Some(ready);
+            cleaner.cleanup_using(false, |child, _| {
+                ready.take().unwrap().send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(6));
+                Jobs::remove_logs(child.unwrap())
+            })
+        });
+        waiting.await.unwrap();
+        assert_eq!(jobs.get(&old).unwrap()["status"], "purging");
+        assert!(jobs.followup(&old, "continue").is_err());
+        assert_eq!(cleanup.await.unwrap().unwrap()["ok"], true);
+        assert!(jobs.get(&running).unwrap()["updated"].as_f64().unwrap() > before + 4.0);
+        tokio::time::timeout(Duration::from_secs(12), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(jobs.get(&running).unwrap()["status"], "succeeded");
+    }
+}
