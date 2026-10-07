@@ -106,3 +106,30 @@ async fn stderr_boundary_does_not_retain_a_credential_prefix() {
     let diagnostic = std::fs::read_to_string(state.path().join("stderr.log")).unwrap();
     assert!(!diagnostic.contains("PRIVAT"));
 }
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_credentials_are_rejected_before_launch() {
+    use std::os::unix::ffi::OsStringExt;
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"))
+        .env(
+            "FIXTURE_API_KEY",
+            std::ffi::OsString::from_vec(b"abcdefgh\xffijklmnop".to_vec()),
+        )
+        .arg("--state-dir")
+        .arg(state.path())
+        .arg("--codex")
+        .arg("missing-backend")
+        .arg("run")
+        .arg("--cwd")
+        .arg(repo.path())
+        .args(["--task", "inspect"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("Credential environment values must be UTF-8"));
+    assert!(!error.contains("abcdefgh"));
+}
