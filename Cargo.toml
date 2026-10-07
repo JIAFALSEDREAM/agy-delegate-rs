@@ -9,6 +9,7 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1"
+aho-corasick = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 dotenvy = "0.15"
