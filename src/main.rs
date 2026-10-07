@@ -22,6 +22,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Action {
     Init,
+    Doctor,
+    #[command(hide = true)]
+    SandboxProbe {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        nonce: String,
+    },
     Run {
         #[arg(long)]
         cwd: PathBuf,
@@ -69,6 +77,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches)?;
+    if let Action::SandboxProbe { file, nonce } = &cli.action {
+        println!("{}", agy_delegate_rs::doctor::probe(file, nonce)?);
+        return Ok(());
+    }
     if matches!(cli.action, Action::Init) {
         let path = match cli.config_file {
             Some(path) => path,
@@ -79,9 +91,24 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if !matches!(cli.action, Action::Worker { .. }) {
-        cli.config = Config::load(cli.config_file.as_deref(), cli.config, &matches)?;
+        cli.config = match Config::load(cli.config_file.as_deref(), cli.config, &matches) {
+            Ok(config) => config,
+            Err(error) if matches!(cli.action, Action::Doctor) => {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok":false,"checks":[{"name":"configuration","ok":false,"detail":error.to_string()}]})
+                );
+                anyhow::bail!("Doctor checks failed");
+            }
+            Err(error) => return Err(error),
+        };
     }
     match cli.action {
+        Action::Doctor => {
+            let report = agy_delegate_rs::doctor::diagnose(&cli.config).await;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            anyhow::ensure!(report["ok"] == true, "Doctor checks failed");
+        }
         Action::Run { cwd, task } => {
             let dir = private_dir(
                 &cli.config
@@ -113,7 +140,10 @@ async fn main() -> anyhow::Result<()> {
                     agy_delegate_rs::mcp::serve(jobs).await?;
                     return Ok(());
                 }
-                Action::Run { .. } | Action::Init => unreachable!(),
+                Action::Run { .. }
+                | Action::Init
+                | Action::Doctor
+                | Action::SandboxProbe { .. } => unreachable!(),
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
         }

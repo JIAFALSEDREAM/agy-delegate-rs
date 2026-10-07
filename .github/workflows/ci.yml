@@ -33,3 +33,4 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo test --locked --test sandbox native_sandbox_preserves_fixture -- --ignored
+      - run: cargo test --locked --test maintenance native_doctor_checks_the_sandbox_without_a_model_call -- --ignored
