@@ -50,6 +50,7 @@ enum Action {
         #[arg(long, default_value_t = 10)]
         limit: u64,
     },
+    Mcp,
     #[command(hide = true)]
     Worker {
         #[arg(long)]
@@ -90,6 +91,10 @@ async fn main() -> anyhow::Result<()> {
                 Action::List { limit } => jobs.list(limit)?,
                 Action::Worker { job_id } => {
                     jobs.worker(&job_id).await?;
+                    return Ok(());
+                }
+                Action::Mcp => {
+                    agy_delegate_rs::mcp::serve(jobs).await?;
                     return Ok(());
                 }
                 Action::Run { .. } => unreachable!(),

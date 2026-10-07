@@ -75,12 +75,13 @@ fn writable_directory_cannot_be_in_project() {
 }
 
 #[test]
+#[ignore = "helper invoked explicitly by native sandbox test"]
 fn fixture_child() {
-    let Ok(file) = std::env::var("AGY_SANDBOX_FIXTURE") else {
-        return;
-    };
+    let file =
+        std::env::var("AGY_SANDBOX_FIXTURE").expect("sandbox must forward fixture environment");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
     assert!(std::fs::write(file, "changed").is_err());
+    tempfile::NamedTempFile::new().expect("sandbox must permit native temporary files");
 }
 
 #[tokio::test]
@@ -93,15 +94,54 @@ async fn native_sandbox_preserves_fixture() {
     std::fs::write(&file, "original").unwrap();
     let mut cmd = config().sandbox(workspace.path(), &tmp).unwrap();
     cmd.arg(std::env::current_exe().unwrap())
-        .args(["--exact", "fixture_child", "--nocapture"])
+        .args(["--exact", "fixture_child", "--nocapture", "--ignored"])
         .env("AGY_SANDBOX_FIXTURE", &file)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = cmd.output().await.unwrap();
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        cmd.kill_on_drop(true).output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(std::fs::read_to_string(file).unwrap(), "original");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "helper invoked by Windows environment test"]
+fn windows_environment_child() {
+    let mut cfg = config();
+    cfg.agy_env_file = Some(std::env::var_os("AGY_ENV_FIXTURE").unwrap().into());
+    let env = cfg.environment().unwrap();
+    assert_eq!(
+        env.get(&std::ffi::OsString::from("PATH")).unwrap(),
+        "inherited-path"
+    );
+    assert!(!env.contains_key(&std::ffi::OsString::from("Path")));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_inherited_path_takes_precedence_over_dotenv() {
+    let state = tempfile::tempdir().unwrap();
+    let file = state.path().join("api.env");
+    std::fs::write(&file, "PATH=dotenv-path\n").unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "windows_environment_child", "--ignored"])
+        .env("Path", "inherited-path")
+        .env("AGY_ENV_FIXTURE", file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
