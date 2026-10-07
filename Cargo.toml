@@ -1,0 +1,22 @@
+[package]
+name = "agy-delegate-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Read-only agy investigations through the Codex OS sandbox"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+dotenvy = "0.15"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+toml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
