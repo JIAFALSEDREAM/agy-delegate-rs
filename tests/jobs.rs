@@ -78,6 +78,43 @@ fn failed_backend_persists_without_unsandboxed_fallback() {
     );
 }
 
+#[test]
+fn malformed_records_error_and_reserved_history_rejects_followup() {
+    use agy_delegate_rs::{config::Config, jobs::Jobs};
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let jobs = Jobs::new(Config {
+        state_dir: Some(state.path().into()),
+        ..Config::default()
+    })
+    .unwrap();
+    let db = rusqlite::Connection::open(jobs.state.join("jobs.sqlite3")).unwrap();
+    for data in ["[]", "null", "123", "\"text\""] {
+        let id = uuid::Uuid::new_v4().to_string();
+        db.execute(
+            "INSERT INTO jobs VALUES(?1,?1,'succeeded',0,?2)",
+            rusqlite::params![id, data],
+        )
+        .unwrap();
+        assert!(jobs.get(&id).is_err());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let data = serde_json::json!({"id":id,"root_id":id,"status":"purging","local_log_dir":state.path().join("jobs").join(&id),"cwd":repo.path(),"config":jobs.config,"conversation":"fixture","cleanup_previous_status":"succeeded"});
+    db.execute(
+        "INSERT INTO jobs VALUES(?1,?1,'purging',0,?2)",
+        rusqlite::params![id, data.to_string()],
+    )
+    .unwrap();
+    let error = jobs.followup(&id, "continue").unwrap_err().to_string();
+    assert!(error.contains("being cleaned"));
+    assert!(
+        jobs.get(&id)
+            .unwrap()
+            .get("cleanup_previous_status")
+            .is_none()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn wait_timeout_keeps_task_alive_and_cancel_stops_it() {

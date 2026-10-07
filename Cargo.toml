@@ -26,6 +26,8 @@ which = "8"
 fs2 = "0.4"
 sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 tempfile = "3"
+cap-std = "3.4"
+cap-fs-ext = "3.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

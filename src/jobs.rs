@@ -3,6 +3,8 @@ use crate::{
     runner,
 };
 use anyhow::{Context, Result, ensure};
+use cap_fs_ext::DirExt;
+use cap_std::fs::Dir;
 use fs2::FileExt;
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -10,6 +12,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::process::Command;
@@ -93,6 +96,7 @@ fn owner(job: &Value) -> Result<fs::File> {
 pub struct Jobs {
     pub config: Config,
     pub state: PathBuf,
+    job_root: Arc<Dir>,
 }
 
 impl Jobs {
@@ -107,8 +111,19 @@ impl Jobs {
         if let Some(path) = &config.agy_env_file {
             config.agy_env_file = Some(path.canonicalize()?);
         }
-        let jobs = Self { config, state };
-        jobs.db()?.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, root TEXT, status TEXT, updated REAL, data TEXT);")?;
+        let root = Dir::open_ambient_dir(&state, cap_std::ambient_authority())?;
+        match root.create_dir("jobs") {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let job_root = Arc::new(root.open_dir_nofollow("jobs")?);
+        let jobs = Self {
+            config,
+            state,
+            job_root,
+        };
+        jobs.db()?.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, root TEXT, status TEXT, updated REAL, data TEXT); CREATE INDEX IF NOT EXISTS jobs_root_status ON jobs(root,status); CREATE INDEX IF NOT EXISTS jobs_live_root_id ON jobs(root,id) WHERE status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked');")?;
         Ok(jobs)
     }
     fn db(&self) -> Result<Connection> {
@@ -124,6 +139,7 @@ impl Jobs {
             })
             .context("Unknown job ID")?;
         let mut job: Value = serde_json::from_str(&data)?;
+        ensure!(job.is_object(), "Invalid job record: expected object");
         job["updated"] = updated.into();
         Ok(job)
     }
@@ -167,6 +183,9 @@ impl Jobs {
         job.as_object_mut().unwrap().remove("task");
         job.as_object_mut().unwrap().remove("sandbox_pid");
         job.as_object_mut().unwrap().remove("sandbox_start");
+        job.as_object_mut()
+            .unwrap()
+            .remove("cleanup_previous_status");
         if let Some(report) = job["report"].as_str() {
             let limit = self.config.report_chars as usize;
             let truncated = report.chars().count() > limit;
@@ -198,7 +217,7 @@ impl Jobs {
             self.get(parent)?;
             let old = Self::load(&self.db()?, parent)?;
             let db = self.db()?;
-            let mut query = db.prepare("SELECT id FROM jobs WHERE root=?1 AND status IN ('starting','running','cancelling')")?;
+            let mut query = db.prepare("SELECT id FROM jobs WHERE root=?1 AND status IN ('starting','running','cancelling','purging')")?;
             let ids = query
                 .query_map([old["root_id"].as_str()], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -211,12 +230,15 @@ impl Jobs {
         let id = uuid::Uuid::new_v4().to_string();
         let (root, conversation) = if let Some(parent) = parent {
             let old = Self::load(&tx, parent)?;
-            ensure!(!active(&old), "Follow-up requires a stopped task");
+            ensure!(
+                !active(&old) && old["status"] != "purging",
+                "Follow-up requires a stopped task that is not being cleaned"
+            );
             let root = old["root_id"]
                 .as_str()
                 .context("Missing root ID")?
                 .to_owned();
-            let count: i64 = tx.query_row("SELECT count(*) FROM jobs WHERE root=?1 AND status IN ('starting','running','cancelling')", [&root], |r|r.get(0))?;
+            let count: i64 = tx.query_row("SELECT count(*) FROM jobs WHERE root=?1 AND status IN ('starting','running','cancelling','purging')", [&root], |r|r.get(0))?;
             ensure!(count == 0, "Another task in this conversation is active");
             (
                 root,
@@ -269,6 +291,7 @@ impl Jobs {
         let original = Self {
             config,
             state: self.state.clone(),
+            job_root: self.job_root.clone(),
         };
         original.submit(
             message,
