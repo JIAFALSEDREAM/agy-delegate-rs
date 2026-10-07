@@ -23,6 +23,10 @@ struct Cli {
 enum Action {
     Init,
     Doctor,
+    Cleanup {
+        #[arg(long)]
+        dry_run: bool,
+    },
     #[command(hide = true)]
     SandboxProbe {
         #[arg(long)]
@@ -124,8 +128,10 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         action => {
+            let cleaning = matches!(action, Action::Cleanup { .. });
             let jobs = Jobs::new(cli.config)?;
             let value = match action {
+                Action::Cleanup { dry_run } => jobs.cleanup(dry_run)?,
                 Action::Submit { cwd, task } => jobs.submit(&task, &cwd, None)?,
                 Action::Status { job_id } => jobs.get(&job_id)?,
                 Action::Wait { job_id, seconds } => jobs.wait(&job_id, seconds).await?,
@@ -146,6 +152,12 @@ async fn main() -> anyhow::Result<()> {
                 | Action::SandboxProbe { .. } => unreachable!(),
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
+            if cleaning {
+                anyhow::ensure!(
+                    value["ok"] == true,
+                    "Some task logs could not be cleaned; task records were retained"
+                );
+            }
         }
     }
     Ok(())

@@ -3,7 +3,7 @@ use crate::{
     runner,
 };
 use anyhow::{Context, Result, ensure};
-use cap_fs_ext::DirExt;
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::fs::Dir;
 use fs2::FileExt;
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -346,6 +346,336 @@ impl Jobs {
             }
         }
         self.get(id)
+    }
+    pub fn cleanup(&self, dry_run: bool) -> Result<Value> {
+        self.cleanup_using(dry_run, |child, _| child.map_or(Ok(()), Self::remove_logs))
+    }
+    fn remove_logs(child: Dir) -> std::io::Result<()> {
+        // Reopen from the verified root, with no-follow at every component.
+        // Keep descriptor and call-stack use constant, even for deeply nested tmp trees.
+        let mut pending = vec![(PathBuf::new(), false)];
+        while let Some((path, visited)) = pending.pop() {
+            if visited && path.as_os_str().is_empty() {
+                continue;
+            }
+            let mut dir = child.try_clone()?;
+            for component in path.components() {
+                dir = dir.open_dir_nofollow(component)?;
+            }
+            if visited {
+                dir.remove_open_dir()?;
+            } else {
+                pending.push((path.clone(), true));
+                for entry in dir.entries()? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() {
+                        pending.push((path.join(entry.file_name()), false));
+                    } else {
+                        dir.remove_file(entry.file_name())?;
+                    }
+                }
+            }
+        }
+        // Final removal is nonrecursive: a concurrent substitution cannot lose contents.
+        child.remove_open_dir()
+    }
+    fn cleanup_using(
+        &self,
+        dry_run: bool,
+        mut remove: impl FnMut(Option<Dir>, &str) -> std::io::Result<()>,
+    ) -> Result<Value> {
+        self.config.validate()?;
+        // Keep cleaner ownership outside the tree whose owner.lock is removed.
+        // Never unlink this stable lock: other cleaners may already have it open.
+        let _cleanup_lease = if dry_run {
+            None
+        } else {
+            let mut options = cap_std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .create(true)
+                .follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NONBLOCK);
+            }
+            let file = self.job_root.open_with(".cleanup.lock", &options)?;
+            ensure!(file.metadata()?.is_file(), "Unsafe cleanup lock");
+            let file = file.into_std();
+            match file.try_lock_exclusive() {
+                Ok(()) => Some(file),
+                Err(error)
+                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    return Ok(
+                        json!({"ok":true,"dry_run":false,"selected_ids":[],"deleted_ids":[],"errors":[],"skipped":[{"reason":"cleanup_active"}]}),
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let directory = self.state.join("jobs");
+        let mut db = self.db()?;
+        let rows = {
+            let mut query =
+                db.prepare("SELECT id,root,status,updated FROM jobs ORDER BY (status='purging') DESC,updated DESC,id")?;
+            query
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, f64>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let terminal = |status: &str| {
+            [
+                "succeeded",
+                "failed",
+                "cancelled",
+                "timed_out",
+                "interrupted",
+                "blocked",
+            ]
+            .contains(&status)
+        };
+        let protected: std::collections::BTreeSet<_> = rows
+            .iter()
+            .filter(|row| !terminal(&row.2) && row.2 != "purging")
+            .map(|row| row.1.as_str())
+            .collect();
+        let cutoff = now() - self.config.retention_days as f64 * 86400.0;
+        let mut rank = 0_u64;
+        let mut preview_purged = std::collections::BTreeSet::new();
+        let (mut selected, mut deleted, mut skipped, mut errors) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (id, root, status, updated) in &rows {
+            if (!terminal(status) && status != "purging") || protected.contains(root.as_str()) {
+                continue;
+            }
+            let job = match Self::load(&db, id) {
+                Ok(job) => job,
+                Err(error) => {
+                    match error.downcast_ref::<rusqlite::Error>() {
+                        Some(rusqlite::Error::QueryReturnedNoRows) => {}
+                        Some(database_error) => errors.push(
+                            json!({"id":id,"operation":"read_record","detail":database_error.to_string()}),
+                        ),
+                        None => skipped.push(json!({"id":id,"reason":"invalid_record"})),
+                    }
+                    continue;
+                }
+            };
+            let path = directory.join(id);
+            if uuid::Uuid::parse_str(id).is_err()
+                || job["local_log_dir"].as_str().map(Path::new) != Some(path.as_path())
+                || job["id"].as_str() != Some(id.as_str())
+                || job["status"].as_str() != Some(status.as_str())
+                || job["root_id"].as_str() != Some(root.as_str())
+            {
+                skipped.push(json!({"id":id,"reason":"unverified_log_directory"}));
+                continue;
+            }
+            if status == "purging"
+                && !job["cleanup_previous_status"]
+                    .as_str()
+                    .is_some_and(terminal)
+            {
+                skipped.push(json!({"id":id,"reason":"invalid_cleanup_reservation"}));
+                continue;
+            }
+            let child = match self.job_root.symlink_metadata(id) {
+                Ok(meta) if meta.is_dir() => match self.job_root.open_dir_nofollow(id) {
+                    Ok(child) => Some(child),
+                    Err(error) => {
+                        errors.push(
+                            json!({"id":id,"operation":"open_logs","detail":error.to_string()}),
+                        );
+                        continue;
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let current = Dir::open_ambient_dir(&self.state, cap_std::ambient_authority())
+                        .and_then(|state| state.open_dir_nofollow("jobs"))
+                        .and_then(|root| root.dir_metadata());
+                    let expected = self.job_root.dir_metadata()?;
+                    let current = match current {
+                        Ok(current) => current,
+                        Err(error) => {
+                            errors.push(json!({"id":id,"operation":"verify_job_root","detail":error.to_string()}));
+                            continue;
+                        }
+                    };
+                    if current.dev() != expected.dev() || current.ino() != expected.ino() {
+                        skipped.push(json!({"id":id,"reason":"job_root_changed"}));
+                        continue;
+                    }
+                    None
+                }
+                Ok(_) => {
+                    skipped.push(json!({"id":id,"reason":"unsafe_log_directory"}));
+                    continue;
+                }
+                Err(error) => {
+                    errors.push(
+                        json!({"id":id,"operation":"inspect_logs","detail":error.to_string()}),
+                    );
+                    continue;
+                }
+            };
+            let mut lease = if let Some(child) = &child {
+                match child.symlink_metadata("owner.lock") {
+                    Ok(meta) if meta.is_file() => {
+                        let mut options = cap_std::fs::OpenOptions::new();
+                        options.read(true).write(true).follow(FollowSymlinks::No);
+                        #[cfg(unix)]
+                        {
+                            use cap_std::fs::OpenOptionsExt;
+                            options.custom_flags(libc::O_NONBLOCK);
+                        }
+                        match child.open_with("owner.lock", &options) {
+                            Ok(file) => match file.metadata() {
+                                Ok(meta) if meta.is_file() => Some(file.into_std()),
+                                Ok(_) => {
+                                    skipped.push(json!({"id":id,"reason":"unsafe_owner_lock"}));
+                                    continue;
+                                }
+                                Err(error) => {
+                                    errors.push(json!({"id":id,"operation":"inspect_owner_lock","detail":error.to_string()}));
+                                    continue;
+                                }
+                            },
+                            Err(error) => {
+                                errors.push(json!({"id":id,"operation":"open_owner_lock","detail":error.to_string()}));
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Ok(_) => {
+                        skipped.push(json!({"id":id,"reason":"unsafe_owner_lock"}));
+                        continue;
+                    }
+                    Err(error) => {
+                        errors.push(json!({"id":id,"operation":"inspect_owner_lock","detail":error.to_string()}));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(file) = &lease
+                && let Err(error) = file.try_lock_exclusive()
+            {
+                if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                    skipped.push(json!({"id":id,"reason":"ownership_active"}));
+                } else {
+                    errors
+                        .push(json!({"id":id,"operation":"lock_owner","detail":error.to_string()}));
+                }
+                continue;
+            }
+            if sandbox_alive(&job) {
+                skipped.push(json!({"id":id,"reason":"ownership_active"}));
+                continue;
+            }
+            let blocked = {
+                let mut query = db.prepare("SELECT id FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked')")?;
+                query
+                    .query_map(params![root, id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .iter()
+                    .any(|id| !preview_purged.contains(id))
+            };
+            if blocked {
+                continue;
+            }
+            let chosen =
+                status == "purging" || *updated < cutoff || rank >= self.config.max_history_jobs;
+            if status != "purging" {
+                rank += 1;
+            }
+            if !chosen {
+                continue;
+            }
+            selected.push(id.clone());
+            if dry_run {
+                if status == "purging" {
+                    preview_purged.insert(id.clone());
+                }
+                continue;
+            }
+            if lease.is_none()
+                && let Some(child) = &child
+            {
+                let mut options = cap_std::fs::OpenOptions::new();
+                options
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .follow(FollowSymlinks::No);
+                match child.open_with("owner.lock", &options) {
+                    Ok(file) => {
+                        let file = file.into_std();
+                        if let Err(error) = file.try_lock_exclusive() {
+                            if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                                skipped.push(json!({"id":id,"reason":"ownership_active"}));
+                            } else {
+                                errors.push(json!({"id":id,"operation":"lock_owner","detail":error.to_string()}));
+                            }
+                            continue;
+                        }
+                        lease = Some(file);
+                    }
+                    Err(error) => {
+                        errors.push(json!({"id":id,"operation":"create_owner_lock","detail":error.to_string()}));
+                        continue;
+                    }
+                }
+            }
+            // Reserve under a short writer transaction. All filesystem deletion is outside it.
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current = match Self::load(&tx, id) {
+                Ok(current) => current,
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<rusqlite::Error>(),
+                        Some(rusqlite::Error::QueryReturnedNoRows)
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let blocked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked'))", params![root,id], |row|row.get(0))?;
+            if blocked || current["status"] != job["status"] || current["root_id"] != job["root_id"]
+            {
+                skipped.push(json!({"id":id,"reason":"changed_or_active_conversation"}));
+                continue;
+            }
+            if status != "purging" {
+                tx.execute("UPDATE jobs SET status='purging',data=json_set(data,'$.status','purging','$.cleanup_previous_status',?1) WHERE id=?2", params![status,id])?;
+            }
+            tx.commit()?;
+            // The stable cleanup lock and purging status now protect ownership.
+            // Close the per-job file before deletion so Windows can remove its directory.
+            drop(lease);
+            if let Err(error) = remove(child, id) {
+                db.execute("UPDATE jobs SET status=json_extract(data,'$.cleanup_previous_status'),data=json_remove(json_set(data,'$.status',json_extract(data,'$.cleanup_previous_status')),'$.cleanup_previous_status') WHERE id=?1 AND status='purging'", [id])?;
+                errors.push(json!({"id":id,"operation":"remove_logs","detail":error.to_string(),"record_retained":true}));
+                continue;
+            }
+            if db.execute("DELETE FROM jobs WHERE id=?1 AND status='purging'", [id])? == 1 {
+                deleted.push(id.clone());
+            }
+        }
+        Ok(
+            json!({"ok":errors.is_empty(),"dry_run":dry_run,"selected_ids":selected,"deleted_ids":deleted,"skipped":skipped,"errors":errors}),
+        )
     }
     pub fn list(&self, limit: u64) -> Result<Value> {
         ensure!((1..=20).contains(&limit), "Limit must be between 1 and 20");
