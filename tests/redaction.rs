@@ -91,6 +91,7 @@ async fn stderr_boundary_does_not_retain_a_credential_prefix() {
         model: None,
         timeout: 2,
         state_dir: None,
+        ..Config::default()
     };
     let result = runner::run(
         &cfg,

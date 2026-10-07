@@ -3,7 +3,7 @@ use agy_delegate_rs::{
     jobs::Jobs,
     runner,
 };
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -12,6 +12,8 @@ use std::path::PathBuf;
     about = "Read-only agy investigations through the Codex sandbox"
 )]
 struct Cli {
+    #[arg(long = "config", global = true)]
+    config_file: Option<PathBuf>,
     #[command(flatten)]
     config: Config,
     #[command(subcommand)]
@@ -19,6 +21,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    Init,
     Run {
         #[arg(long)]
         cwd: PathBuf,
@@ -64,7 +67,20 @@ async fn main() -> anyhow::Result<()> {
     unsafe {
         libc::umask(0o077);
     }
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if matches!(cli.action, Action::Init) {
+        let path = match cli.config_file {
+            Some(path) => path,
+            None => Config::file_path()?,
+        };
+        cli.config.initialize(&path)?;
+        println!("{}", serde_json::json!({"config_file":path}));
+        return Ok(());
+    }
+    if !matches!(cli.action, Action::Worker { .. }) {
+        cli.config = Config::load(cli.config_file.as_deref(), cli.config, &matches)?;
+    }
     match cli.action {
         Action::Run { cwd, task } => {
             let dir = private_dir(
@@ -97,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                     agy_delegate_rs::mcp::serve(jobs).await?;
                     return Ok(());
                 }
-                Action::Run { .. } => unreachable!(),
+                Action::Run { .. } | Action::Init => unreachable!(),
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
         }

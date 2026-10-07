@@ -13,6 +13,7 @@ fn config() -> Config {
         model: None,
         timeout: 5,
         state_dir: None,
+        ..Config::default()
     }
 }
 

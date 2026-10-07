@@ -15,6 +15,7 @@ async fn fake(body: &str) -> anyhow::Result<serde_json::Value> {
         model: None,
         timeout: 1,
         state_dir: None,
+        ..Config::default()
     };
     tokio::time::timeout(
         Duration::from_secs(9),
@@ -54,6 +55,7 @@ async fn ownership_acknowledgement_precedes_task_delivery_and_is_cancellable() {
             model: None,
             timeout: 30,
             state_dir: None,
+            ..Config::default()
         };
         let result = tokio::time::timeout(Duration::from_secs(3), async {
             tokio::join!(
@@ -217,6 +219,7 @@ async fn cancellation_after_stdout_eof_stops_the_task() {
             model: None,
             timeout: 30,
             state_dir: None,
+            ..Config::default()
         };
         let cancel = state.path().join("cancel");
         let task = if blocked_stdin {

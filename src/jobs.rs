@@ -168,8 +168,9 @@ impl Jobs {
         job.as_object_mut().unwrap().remove("sandbox_pid");
         job.as_object_mut().unwrap().remove("sandbox_start");
         if let Some(report) = job["report"].as_str() {
-            let truncated = report.chars().count() > 6000;
-            job["report"] = report.chars().take(6000).collect::<String>().into();
+            let limit = self.config.report_chars as usize;
+            let truncated = report.chars().count() > limit;
+            job["report"] = report.chars().take(limit).collect::<String>().into();
             job["report_truncated"] = truncated.into();
         }
         Ok(job)

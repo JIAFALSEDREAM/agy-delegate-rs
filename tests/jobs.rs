@@ -228,6 +228,7 @@ async fn stale_heartbeat_preserves_owned_jobs_and_rejects_reused_process_identit
         model: None,
         timeout: 2,
         state_dir: Some(state.path().to_owned()),
+        ..Config::default()
     })
     .unwrap();
     let id = uuid::Uuid::new_v4().to_string();

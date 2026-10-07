@@ -1,15 +1,17 @@
 use anyhow::{Context, Result, ensure};
-use clap::Args;
+use clap::{ArgMatches, Args, parser::ValueSource};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 use tokio::process::Command;
 
 #[derive(Args, Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     #[arg(long, default_value = "codex")]
     pub codex: PathBuf,
@@ -23,6 +25,28 @@ pub struct Config {
     pub timeout: u64,
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = 4000, value_parser = clap::value_parser!(u64).range(256..=6000))]
+    pub report_chars: u64,
+    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u64).range(1..=365))]
+    pub retention_days: u64,
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(10..=10000))]
+    pub max_history_jobs: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            codex: "codex".into(),
+            agy: "agy".into(),
+            agy_env_file: None,
+            model: None,
+            timeout: 600,
+            state_dir: None,
+            report_chars: 4000,
+            retention_days: 14,
+            max_history_jobs: 1000,
+        }
+    }
 }
 
 pub fn private_dir(path: &Path) -> Result<PathBuf> {
@@ -47,6 +71,126 @@ fn env_key(key: OsString) -> OsString {
 }
 
 impl Config {
+    pub fn file_path() -> Result<PathBuf> {
+        Ok(directories::ProjectDirs::from("", "", "agy-delegate-rs")
+            .context("Cannot find user configuration directory")?
+            .config_dir()
+            .join("config.toml"))
+    }
+
+    fn resolve_paths(&mut self, base: &Path) {
+        for executable in [&mut self.codex, &mut self.agy] {
+            if executable.is_relative() && executable.components().count() > 1 {
+                *executable = base.join(&*executable);
+            }
+        }
+        for path in [&mut self.agy_env_file, &mut self.state_dir]
+            .into_iter()
+            .flatten()
+        {
+            if path.is_relative() && !path.as_os_str().is_empty() {
+                *path = base.join(&*path);
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!((1..=7200).contains(&self.timeout), "timeout must be 1–7200");
+        ensure!(
+            (256..=6000).contains(&self.report_chars),
+            "report_chars must be 256–6000"
+        );
+        ensure!(
+            (1..=365).contains(&self.retention_days),
+            "retention_days must be 1–365"
+        );
+        ensure!(
+            (10..=10000).contains(&self.max_history_jobs),
+            "max_history_jobs must be 10–10000"
+        );
+        for path in [
+            Some(&self.codex),
+            Some(&self.agy),
+            self.agy_env_file.as_ref(),
+            self.state_dir.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            ensure!(
+                !path.as_os_str().is_empty(),
+                "Configured paths must not be empty"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn load(path: Option<&Path>, overrides: Self, matches: &ArgMatches) -> Result<Self> {
+        let selected = match path {
+            Some(path) => path.to_owned(),
+            None => Self::file_path()?,
+        };
+        let mut config = match fs::read_to_string(&selected) {
+            Ok(text) => toml::from_str::<Self>(&text).map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid TOML configuration or unknown setting; contents are not logged"
+                )
+            })?,
+            Err(error) if path.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
+                Self::default()
+            }
+            Err(error) => return Err(error).context("Cannot read configuration file"),
+        };
+        let absolute = std::env::current_dir()?.join(&selected);
+        config.resolve_paths(
+            absolute
+                .parent()
+                .context("Configuration file needs a parent directory")?,
+        );
+        macro_rules! override_fields {
+            ($($field:ident),*) => { $(
+                if matches.value_source(stringify!($field)) == Some(ValueSource::CommandLine) {
+                    config.$field = overrides.$field;
+                }
+            )* };
+        }
+        override_fields!(
+            codex,
+            agy,
+            agy_env_file,
+            model,
+            timeout,
+            state_dir,
+            report_chars,
+            retention_days,
+            max_history_jobs
+        );
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn initialize(mut self, path: &Path) -> Result<()> {
+        self.validate()?;
+        self.resolve_paths(&std::env::current_dir()?);
+        let text = format!(
+            "# Credentials belong in the inherited environment or a separate agy_env_file.\n{}\n# agy_env_file = \"/path/to/api.env\"\n# model = \"your-model\"\n# state_dir = \"/path/to/state\"\n",
+            toml::to_string_pretty(&self)?
+        );
+        let absolute = std::env::current_dir()?.join(path);
+        let parent = absolute
+            .parent()
+            .context("Configuration file needs a parent directory")?;
+        fs::create_dir_all(parent)?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".config-")
+            .tempfile_in(parent)?;
+        file.write_all(text.as_bytes())?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(absolute)
+            .context("Cannot create configuration; existing files are never overwritten")?;
+        Ok(())
+    }
+
     pub fn state(&self) -> Result<PathBuf> {
         let default = directories::ProjectDirs::from("", "", "agy-delegate-rs")
             .context("Cannot find user data directory")?;
