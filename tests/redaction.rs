@@ -70,3 +70,39 @@ fn colliding_redacted_keys_preserve_every_value() {
     assert!(!object.contains_key("abcdefgh"));
     assert!(!object.contains_key("ijklmnop"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stderr_boundary_does_not_retain_a_credential_prefix() {
+    use agy_delegate_rs::{config::Config, runner};
+    use std::os::unix::fs::PermissionsExt;
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let secret = "PRIVATE_FIXTURE_SECRET_SUFFIX";
+    let env = state.path().join("api.env");
+    std::fs::write(&env, format!("FIXTURE_API_KEY={secret}\n")).unwrap();
+    let backend = state.path().join("backend");
+    std::fs::write(&backend,format!("#!/bin/sh\ncat >/dev/null\nhead -c 65530 /dev/zero >&2\nprintf '%s' '{secret}' >&2\nprintf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"response\":\"ok\"}}}}'\n")).unwrap();
+    std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let cfg = Config {
+        codex: backend,
+        agy: "agy".into(),
+        agy_env_file: Some(env),
+        model: None,
+        timeout: 2,
+        state_dir: None,
+    };
+    let result = runner::run(
+        &cfg,
+        repo.path(),
+        "inspect",
+        None,
+        state.path(),
+        async |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["status"], "succeeded");
+    let diagnostic = std::fs::read_to_string(state.path().join("stderr.log")).unwrap();
+    assert!(!diagnostic.contains("PRIVAT"));
+}

@@ -3,6 +3,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
@@ -34,6 +35,17 @@ pub fn private_dir(path: &Path) -> Result<PathBuf> {
     Ok(path.canonicalize()?)
 }
 
+fn env_key(key: OsString) -> OsString {
+    #[cfg(windows)]
+    {
+        key.to_ascii_uppercase()
+    }
+    #[cfg(not(windows))]
+    {
+        key
+    }
+}
+
 impl Config {
     pub fn state(&self) -> Result<PathBuf> {
         let default = directories::ProjectDirs::from("", "", "agy-delegate-rs")
@@ -45,12 +57,18 @@ impl Config {
         )
     }
 
-    pub fn environment(&self) -> Result<BTreeMap<String, String>> {
-        let mut env: BTreeMap<_, _> = std::env::vars().collect();
+    pub fn environment(&self) -> Result<BTreeMap<OsString, OsString>> {
+        let mut env: BTreeMap<_, _> = std::env::vars_os()
+            .map(|(key, value)| (env_key(key), value))
+            .collect();
         if let Some(path) = &self.agy_env_file {
-            for entry in dotenvy::from_path_iter(path)? {
-                let (key, value) = entry?;
-                env.entry(key).or_insert(value);
+            let entries = dotenvy::from_path_iter(path)
+                .map_err(|_| anyhow::anyhow!("Cannot open agy environment file"))?;
+            for entry in entries {
+                let (key, value) = entry.map_err(|_| {
+                    anyhow::anyhow!("Invalid agy environment file; contents are not logged")
+                })?;
+                env.entry(env_key(key.into())).or_insert(value.into());
             }
         }
         Ok(env)
@@ -78,7 +96,9 @@ impl Config {
             );
             paths.insert(writable.to_string_lossy().into_owned(), "write".into());
         }
-        let mut command = Command::new(&self.codex);
+        let environment = self.environment()?;
+        let executable = self.executable(&self.codex, &environment, &std::env::current_dir()?);
+        let mut command = Command::new(executable);
         command.args([
             "sandbox",
             "-P",
@@ -102,9 +122,29 @@ impl Config {
         command.args(["-c", "windows.sandbox=unelevated"]);
         command.arg("-C").arg(cwd).arg("--");
         command
-            .envs(self.environment()?)
+            .envs(environment)
             .env("TMPDIR", &tmp)
+            .env("TMP", &tmp)
+            .env("TEMP", &tmp)
             .env("GIT_OPTIONAL_LOCKS", "0");
         Ok(command)
+    }
+
+    pub fn executable(
+        &self,
+        program: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+        cwd: &Path,
+    ) -> PathBuf {
+        let paths = environment.get(&OsString::from("PATH"));
+        #[cfg(windows)]
+        let paths = paths.or_else(|| {
+            environment.iter().find_map(|(key, value)| {
+                key.to_string_lossy()
+                    .eq_ignore_ascii_case("PATH")
+                    .then_some(value)
+            })
+        });
+        which::which_in(program, paths, cwd).unwrap_or_else(|_| program.to_owned())
     }
 }

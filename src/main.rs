@@ -38,9 +38,10 @@ async fn main() -> anyhow::Result<()> {
             let dir = private_dir(
                 &cli.config
                     .state()?
-                    .join(format!("run-{}", std::process::id())),
+                    .join(format!("run-{}", uuid::Uuid::new_v4())),
             )?;
-            let result = runner::run(&cli.config, &cwd, &task, None, &dir, |_| Ok(())).await?;
+            let result =
+                runner::run(&cli.config, &cwd, &task, None, &dir, async |_| Ok(())).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             anyhow::ensure!(
                 result["status"] == "succeeded",
