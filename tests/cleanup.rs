@@ -35,6 +35,60 @@ fn has(values: &Value, id: &str) -> bool {
     values.as_array().unwrap().iter().any(|value| value == id)
 }
 
+#[cfg(unix)]
+#[test]
+fn deep_log_trees_cleanup_under_a_small_descriptor_limit() {
+    use std::os::unix::{fs::symlink, process::CommandExt};
+    let state = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("keep"), "untouched").unwrap();
+    let jobs = jobs(state.path());
+    let id = insert(&jobs, "succeeded", 0.0, None);
+    let root = jobs.state.join("jobs").join(&id);
+    let mut deepest = root.clone();
+    for _ in 0..180 {
+        deepest.push("d");
+        fs::create_dir(&deepest).unwrap();
+    }
+    fs::write(deepest.join("last.log"), "fixture").unwrap();
+    symlink(external.path(), deepest.join("outside")).unwrap();
+    let config = state.path().join("config.toml");
+    fs::write(&config, "").unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"));
+    command
+        .arg("--config")
+        .arg(config)
+        .arg("--state-dir")
+        .arg(state.path())
+        .arg("cleanup");
+    unsafe {
+        command.pre_exec(|| {
+            let mut limit = std::mem::zeroed::<libc::rlimit>();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = limit.rlim_cur.min(64);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["deleted_ids"], json!([id]));
+    assert!(!root.exists());
+    assert_eq!(
+        fs::read_to_string(external.path().join("keep")).unwrap(),
+        "untouched"
+    );
+}
+
 #[test]
 fn interrupted_reservations_do_not_consume_retained_history_slots() {
     let state = tempfile::tempdir().unwrap();
