@@ -38,7 +38,14 @@ fn synchronous_jobs_use_wrapper_args_and_participate_in_automatic_cleanup() {
     let second: Value = serde_json::from_slice(&second.stdout).unwrap();
     assert_ne!(second["id"], json!(id));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while Path::new(first["local_log_dir"].as_str().unwrap()).exists() {
+    while Path::new(first["local_log_dir"].as_str().unwrap()).exists()
+        || db
+            .query_row("SELECT count(*) FROM jobs WHERE id=?1", [id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            != 0
+    {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
