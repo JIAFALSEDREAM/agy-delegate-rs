@@ -24,7 +24,7 @@ pub struct Config {
     pub agy_env_file: Option<PathBuf>,
     #[arg(long)]
     pub model: Option<String>,
-    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
+    #[arg(long, global = true, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
     pub timeout: u64,
     #[arg(long)]
     pub state_dir: Option<PathBuf>,

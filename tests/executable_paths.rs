@@ -52,3 +52,22 @@ fn env_file_only_path_resolves_programs_without_exporting_credentials() {
     fs::remove_file(environment).unwrap();
     config.absolutize().unwrap();
 }
+
+#[test]
+fn timeout_after_the_subcommand_is_applied() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    let output = Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"))
+        .env("HOME", root.path())
+        .args(["init", "--timeout", "123", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let saved: Config = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(saved.timeout, 123);
+}
