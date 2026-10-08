@@ -45,7 +45,10 @@ fn tools() -> Vec<Tool> {
         ),
     ];
     definitions.into_iter().map(|(name,description,properties,required)| {
-        Tool::new(name,description,json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}).as_object().unwrap().clone())
+        Tool::new(name,description,json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}).as_object().unwrap().clone()).with_annotations(ToolAnnotations::from_raw(None,
+            Some(matches!(name, "agy_status" | "agy_wait" | "agy_list")),
+            Some(name == "agy_cancel"), None,
+            Some(matches!(name, "agy_submit" | "agy_followup"))))
     }).collect()
 }
 fn text<'a>(args: &'a JsonObject, key: &str) -> Result<&'a str> {
@@ -103,7 +106,7 @@ impl ServerHandler for Jobs {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
             Implementation::new("agy-delegate-rs", env!("CARGO_PKG_VERSION")),
-        )
+        ).with_instructions("Delegate bounded, read-only repository investigations to Antigravity. Submit returns immediately; do independent work, then wait for the report. Follow up using a job ID. Report failure or incomplete status instead of assuming success.")
     }
     fn get_tool(&self, name: &str) -> Option<Tool> {
         tools().into_iter().find(|t| t.name == name)
@@ -127,6 +130,7 @@ impl ServerHandler for Jobs {
         validate(&request.name, &args)
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         let name = request.name.into_owned();
+        let listing = name == "agy_list";
         let result: Result<Value> = if name == "agy_wait" {
             self.wait(
                 text(&args, "job_id").unwrap(),
@@ -149,6 +153,12 @@ impl ServerHandler for Jobs {
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?
         };
         Ok(match result {
+            Ok(value) if listing => {
+                let mut result =
+                    CallToolResult::success(vec![ContentBlock::text(value.to_string())]);
+                result.structured_content = Some(json!({"result":value}));
+                result.into()
+            }
             Ok(value) => CallToolResult::structured(value).into(),
             Err(error) => CallToolResult::error(vec![ContentBlock::text(error.to_string())]).into(),
         })

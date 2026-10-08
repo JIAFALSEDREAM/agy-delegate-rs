@@ -123,7 +123,7 @@ impl Jobs {
             state,
             job_root,
         };
-        jobs.db()?.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, root TEXT, status TEXT, updated REAL, data TEXT); CREATE INDEX IF NOT EXISTS jobs_root_status ON jobs(root,status); CREATE INDEX IF NOT EXISTS jobs_live_root_id ON jobs(root,id) WHERE status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked');")?;
+        jobs.db()?.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, root TEXT, status TEXT, updated REAL, data TEXT); CREATE INDEX IF NOT EXISTS jobs_root_status ON jobs(root,status); CREATE INDEX IF NOT EXISTS jobs_live_root_id_v2 ON jobs(root,id) WHERE status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked','incomplete');")?;
         Ok(jobs)
     }
     fn db(&self) -> Result<Connection> {
@@ -440,6 +440,7 @@ impl Jobs {
                 "timed_out",
                 "interrupted",
                 "blocked",
+                "incomplete",
             ]
             .contains(&status)
         };
@@ -584,7 +585,7 @@ impl Jobs {
                 continue;
             }
             let blocked = {
-                let mut query = db.prepare("SELECT id FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked')")?;
+                let mut query = db.prepare("SELECT id FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked','incomplete')")?;
                 query
                     .query_map(params![root, id], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?
@@ -651,7 +652,7 @@ impl Jobs {
                 }
                 Err(error) => return Err(error),
             };
-            let blocked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked'))", params![root,id], |row|row.get(0))?;
+            let blocked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked','incomplete'))", params![root,id], |row|row.get(0))?;
             if blocked || current["status"] != job["status"] || current["root_id"] != job["root_id"]
             {
                 skipped.push(json!({"id":id,"reason":"changed_or_active_conversation"}));
@@ -677,6 +678,13 @@ impl Jobs {
             json!({"ok":errors.is_empty(),"dry_run":dry_run,"selected_ids":selected,"deleted_ids":deleted,"skipped":skipped,"errors":errors}),
         )
     }
+    pub fn report(&self, id: &str) -> Result<String> {
+        let job = Self::load(&self.db()?, id)?;
+        Ok(job["report"]
+            .as_str()
+            .context("Task has no stored report")?
+            .to_owned())
+    }
     pub fn list(&self, limit: u64) -> Result<Value> {
         ensure!((1..=20).contains(&limit), "Limit must be between 1 and 20");
         let db = self.db()?;
@@ -685,7 +693,18 @@ impl Jobs {
         let ids = query
             .query_map([limit], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(json!({"result":ids.iter().map(|id|self.get(id)).collect::<Result<Vec<_>>>()?}))
+        let rows = ids
+            .iter()
+            .map(|id| {
+                let job = self.get(id)?;
+                Ok(
+                    json!({"id":job["id"],"status":job["status"],"cwd":job["cwd"],
+                "created":job["created"],"progress":job["progress"].as_str()
+                    .unwrap_or_default().chars().take(120).collect::<String>()}),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(json!(rows))
     }
     pub async fn wait(&self, id: &str, seconds: u64) -> Result<Value> {
         ensure!(seconds <= 55, "Wait must be between 0 and 55 seconds");

@@ -61,6 +61,12 @@ async fn stdio_tools_preserve_failed_job_semantics() {
     };
     let initialized = client.request(1,"initialize",json!({"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1"}})).await;
     assert!(initialized.get("error").is_none());
+    assert!(
+        initialized["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("incomplete")
+    );
     client
         .stdin
         .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
@@ -68,6 +74,17 @@ async fn stdio_tools_preserve_failed_job_semantics() {
         .unwrap();
     let list = client.request(2, "tools/list", json!({})).await;
     assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
+    for tool in list["result"]["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            matches!(name, "agy_wait" | "agy_status" | "agy_list")
+        );
+        assert_eq!(
+            tool["annotations"]["openWorldHint"],
+            matches!(name, "agy_submit" | "agy_followup")
+        );
+    }
     let submit = client
         .request(
             3,
@@ -129,6 +146,16 @@ async fn stdio_tools_preserve_failed_job_semantics() {
         recovered["result"]["structuredContent"]["result"][0]["id"],
         job["id"]
     );
+    assert_eq!(
+        recovered["result"]["structuredContent"]["result"][0]
+            .as_object()
+            .unwrap()
+            .len(),
+        5
+    );
+    let content: Value =
+        serde_json::from_str(recovered["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(content.is_array());
     client.child.kill().await.unwrap();
     client.child.wait().await.unwrap();
 }

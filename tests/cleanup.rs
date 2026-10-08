@@ -500,7 +500,7 @@ fn large_terminal_conversation_uses_the_partial_live_index() {
     }
     tx.commit().unwrap();
     // EXISTS has outer constant-row plan entries; inspect all details for the inner index.
-    let plans = db.prepare("EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked'))").unwrap().query_map([&root,"excluded"], |row|row.get::<_,String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let plans = db.prepare("EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM jobs WHERE root=?1 AND id!=?2 AND status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked','incomplete'))").unwrap().query_map([&root,"excluded"], |row|row.get::<_,String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert!(
         plans.iter().any(|plan| plan.contains("jobs_live_root_id")),
         "{plans:?}"
