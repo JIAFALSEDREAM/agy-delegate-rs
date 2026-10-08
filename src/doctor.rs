@@ -109,7 +109,7 @@ pub fn probe(file: &Path, nonce: &str) -> Result<Value> {
     Ok(json!({"project_write_denied":true,"temp_write_allowed":true,"marker":nonce}))
 }
 
-async fn sandbox(config: &Config, state: &Path) -> Result<()> {
+async fn sandbox(config: &Config, state: &Path, codex_home: Option<&Path>) -> Result<()> {
     let fixture = tempfile::Builder::new()
         .prefix("doctor-")
         .tempdir_in(state)?;
@@ -119,6 +119,9 @@ async fn sandbox(config: &Config, state: &Path) -> Result<()> {
     let nonce = uuid::Uuid::new_v4().to_string();
     fs::write(&file, &nonce)?;
     let mut command = config.sandbox(&project, &tmp)?;
+    if let Some(home) = codex_home {
+        command.env("CODEX_HOME", home);
+    }
     command
         .arg(std::env::current_exe()?)
         .arg("sandbox-probe")
@@ -141,6 +144,10 @@ async fn sandbox(config: &Config, state: &Path) -> Result<()> {
 }
 
 pub async fn diagnose(config: &Config) -> Value {
+    diagnose_in(config, None).await
+}
+
+pub async fn diagnose_in(config: &Config, codex_home: Option<&Path>) -> Value {
     let mut checks = vec![json!({"name":"configuration","ok":true})];
     let environment = match config.environment() {
         Ok(environment) => environment,
@@ -158,6 +165,11 @@ pub async fn diagnose(config: &Config) -> Value {
             command.args(&config.agy_args);
         }
         command.envs(&environment).arg("--version");
+        if name == "codex"
+            && let Some(home) = codex_home
+        {
+            command.env("CODEX_HOME", home);
+        }
         let found = match capture(command).await {
             Ok((stdout, stderr)) => version(&stdout).or_else(|| version(&stderr)),
             Err(_) => None,
@@ -187,7 +199,7 @@ pub async fn diagnose(config: &Config) -> Value {
     let state = config.state();
     checks.push(json!({"name":"state_directory","ok":state.is_ok(),"detail":"Local task storage"}));
     let sandbox_ok = match state {
-        Ok(state) => sandbox(config, &state).await.is_ok(),
+        Ok(state) => sandbox(config, &state, codex_home).await.is_ok(),
         Err(_) => false,
     };
     checks.push(json!({"name":"sandbox","ok":sandbox_ok,"detail":"Read project, reject project writes, allow native temporary files"}));

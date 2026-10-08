@@ -220,3 +220,271 @@ fn registration_resolves_codex_from_env_file_path_without_exporting_credentials(
     let saved: Config = toml::from_str(&saved).unwrap();
     assert!(saved.codex.is_absolute());
 }
+
+#[tokio::test]
+async fn install_is_idempotent_restores_policy_and_preserves_unrelated_config() {
+    let fixture = Fixture::new();
+    let agents = fixture.home.path().join("AGENTS.md");
+    let original = "# Personal rules\nkeep this\n";
+    fs::write(&agents, original).unwrap();
+    let config = fixture.home.path().join("config.toml");
+    fs::write(&config, "# personal comment\nmodel = 'personal-model'\n").unwrap();
+    let mut integration = fixture.integration();
+    assert_eq!(integration.install().await.unwrap()["installed"], true);
+    assert!(
+        fs::read_to_string(&agents)
+            .unwrap()
+            .contains(agy_delegate_rs::integration::POLICY)
+    );
+    integration.install().await.unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.home.path().join("operations")).unwrap(),
+        "add\n"
+    );
+    integration.uninstall().await.unwrap();
+    integration.uninstall().await.unwrap();
+    assert_eq!(fs::read_to_string(&agents).unwrap(), original);
+    let text = fs::read_to_string(config).unwrap();
+    assert!(text.contains("# personal comment") && text.contains("personal-model"));
+    assert!(!text.contains("mcp_servers.agy-delegate-rs"));
+    assert!(fixture.state.path().exists());
+}
+
+#[tokio::test]
+async fn outside_policy_edits_survive_and_managed_edits_block_uninstall() {
+    let fixture = Fixture::new();
+    let mut integration = fixture.integration();
+    let agents = fixture.home.path().join("AGENTS.md");
+    integration.install().await.unwrap();
+    let edited = fs::read_to_string(&agents).unwrap() + "\n# Added rule\nkeep me\n";
+    fs::write(&agents, &edited).unwrap();
+    integration.uninstall().await.unwrap();
+    assert!(fs::read_to_string(&agents).unwrap().contains("keep me"));
+    integration.install().await.unwrap();
+    fs::write(
+        &agents,
+        fs::read_to_string(&agents)
+            .unwrap()
+            .replace("quick_explorer", "custom-worker"),
+    )
+    .unwrap();
+    assert!(
+        integration
+            .uninstall()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("edited")
+    );
+    assert!(
+        fs::read_to_string(fixture.home.path().join("config.toml"))
+            .unwrap()
+            .contains("mcp_servers.agy-delegate-rs")
+    );
+}
+
+#[tokio::test]
+async fn unrelated_registrations_legacy_policy_and_lost_backups_are_preserved() {
+    let fixture = Fixture::new();
+    let mut integration = fixture.integration();
+    let config = fixture.home.path().join("config.toml");
+    let original = "[mcp_servers.agy-delegate-rs]\ncommand='unrelated'\nargs=[]\n";
+    fs::write(&config, original).unwrap();
+    assert!(integration.register().await.is_err());
+    assert!(integration.uninstall().await.is_err());
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    fs::write(&config, "").unwrap();
+    let agents = fixture.home.path().join("AGENTS.md");
+    fs::write(
+        &agents,
+        "<!-- agy-delegate:start -->old policy<!-- agy-delegate:end -->",
+    )
+    .unwrap();
+    assert!(integration.install().await.is_err());
+    assert!(!fs::read_to_string(&config).unwrap().contains("mcp_servers"));
+    fs::write(&agents, "").unwrap();
+    integration.install().await.unwrap();
+    fs::remove_file(fixture.home.path().join(".agy-delegate-rs-policy.json")).unwrap();
+    assert!(integration.install().await.is_err());
+    assert!(integration.uninstall().await.is_err());
+    assert!(
+        fs::read_to_string(&agents)
+            .unwrap()
+            .contains(agy_delegate_rs::integration::POLICY)
+    );
+}
+
+#[tokio::test]
+async fn installation_without_existing_rules_removes_only_its_created_file() {
+    let fixture = Fixture::new();
+    let mut integration = fixture.integration();
+    integration.install().await.unwrap();
+    integration.uninstall().await.unwrap();
+    assert!(!fixture.home.path().join("AGENTS.md").exists());
+    assert!(
+        !fixture
+            .home
+            .path()
+            .join(".agy-delegate-rs-policy.json")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn interrupted_policy_write_is_recoverable_without_discarding_outside_edits() {
+    let fixture = Fixture::new();
+    let agents = fixture.home.path().join("AGENTS.md");
+    fs::write(&agents, "keep original").unwrap();
+    let mut integration = fixture.integration();
+    integration.install().await.unwrap();
+    fs::write(&agents, "keep original").unwrap();
+    integration.install().await.unwrap();
+    assert!(
+        fs::read_to_string(&agents)
+            .unwrap()
+            .contains(agy_delegate_rs::integration::POLICY)
+    );
+    fs::write(&agents, "edited outside without marker").unwrap();
+    assert!(integration.uninstall().await.is_err());
+    assert_eq!(
+        fs::read_to_string(agents).unwrap(),
+        "edited outside without marker"
+    );
+}
+
+#[tokio::test]
+async fn redirected_policy_and_malformed_backup_are_preserved() {
+    let fixture = Fixture::new();
+    let victim = fixture.state.path().join("personal");
+    fs::write(&victim, "keep").unwrap();
+    let agents = fixture.home.path().join("AGENTS.md");
+    std::os::unix::fs::symlink(&victim, &agents).unwrap();
+    let mut integration = fixture.integration();
+    assert!(integration.install().await.is_err());
+    assert!(integration.uninstall().await.is_err());
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+    fs::remove_file(&agents).unwrap();
+    integration.install().await.unwrap();
+    fs::write(
+        fixture.home.path().join(".agy-delegate-rs-policy.json"),
+        "{}",
+    )
+    .unwrap();
+    assert!(integration.uninstall().await.is_err());
+    assert!(
+        fs::read_to_string(&agents)
+            .unwrap()
+            .contains(agy_delegate_rs::integration::POLICY)
+    );
+}
+
+#[test]
+fn failed_install_doctor_does_not_register_or_write_rules() {
+    let fixture = Fixture::new();
+    let source = fs::read_to_string(&fixture.config.codex).unwrap().replace(
+        "path = home / 'config.toml'",
+        "with pathlib.Path(__file__).with_name('doctor-homes').open('a') as stream: stream.write(str(home) + '\\n')\npath = home / 'config.toml'",
+    );
+    fs::write(&fixture.config.codex, source).unwrap();
+    let config = fixture.state.path().join("test-config.toml");
+    fs::write(&config, toml::to_string(&fixture.config).unwrap()).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"))
+        .env("HOME", fixture.home.path())
+        .env("CODEX_HOME", fixture.state.path())
+        .env("XDG_CONFIG_HOME", fixture.home.path().join("config"))
+        .env("XDG_DATA_HOME", fixture.home.path().join("data"))
+        .args(["--config"])
+        .arg(config)
+        .args(["install", "--codex-home"])
+        .arg(fixture.home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    let homes = fs::read_to_string(fixture.state.path().join("doctor-homes")).unwrap();
+    assert_eq!(homes.lines().count(), 2);
+    assert!(
+        homes
+            .lines()
+            .all(|home| std::path::Path::new(home) == fixture.home.path())
+    );
+    for name in [
+        "config.toml",
+        "AGENTS.md",
+        ".agy-delegate-rs-policy.json",
+        "operations",
+    ] {
+        assert!(!fixture.home.path().join(name).exists());
+    }
+}
+
+#[tokio::test]
+async fn outside_rules_changed_during_codex_removal_survive() {
+    let fixture = Fixture::new();
+    let mut integration = fixture.integration();
+    integration.install().await.unwrap();
+    let backend = &fixture.config.codex;
+    let source = fs::read_to_string(backend).unwrap().replace(
+        "    text = path.read_text()\n    start =",
+        "    agents = home / 'AGENTS.md'\n    agents.write_text(agents.read_text() + '\\n# rule added during removal\\n')\n    text = path.read_text()\n    start =",
+    );
+    fs::write(backend, source).unwrap();
+    integration.uninstall().await.unwrap();
+    let rules = fs::read_to_string(fixture.home.path().join("AGENTS.md")).unwrap();
+    assert!(rules.contains("# rule added during removal"));
+    assert!(!rules.contains(agy_delegate_rs::integration::POLICY));
+}
+
+#[tokio::test]
+async fn interrupted_restoration_preserves_outside_rules_and_finishes_on_retry() {
+    let fixture = Fixture::new();
+    let mut integration = fixture.integration();
+    integration.install().await.unwrap();
+    let agents = fixture.home.path().join("AGENTS.md");
+    let backup_path = fixture.home.path().join(".agy-delegate-rs-policy.json");
+    let installed = fs::read_to_string(&agents).unwrap() + "\n# outside rule\n";
+    let restored = installed.replace(agy_delegate_rs::integration::POLICY, "");
+    let mut backup: serde_json::Value =
+        serde_json::from_slice(&fs::read(&backup_path).unwrap()).unwrap();
+    backup["restored"] = restored.clone().into();
+    backup.as_object_mut().unwrap().remove("added");
+    fs::write(&backup_path, backup.to_string()).unwrap();
+    fs::write(&agents, &installed).unwrap();
+    fs::write(fixture.home.path().join("config.toml"), "").unwrap();
+    assert!(integration.install().await.is_err());
+    assert_eq!(
+        fs::read_to_string(fixture.home.path().join("operations")).unwrap(),
+        "add\n"
+    );
+    fs::write(&agents, backup["original"].as_str().unwrap()).unwrap();
+    assert!(integration.uninstall().await.is_err());
+    assert!(integration.install().await.is_err());
+    assert!(backup_path.exists());
+    fs::write(&agents, &restored).unwrap();
+    assert!(
+        integration
+            .install()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("retry uninstall")
+    );
+    integration.uninstall().await.unwrap();
+    assert_eq!(fs::read_to_string(&agents).unwrap(), restored);
+    assert!(!backup_path.exists());
+    integration.uninstall().await.unwrap();
+    assert_eq!(fs::read_to_string(agents).unwrap(), restored);
+}
+
+#[tokio::test]
+async fn large_rules_restore_without_duplicating_the_backup() {
+    let fixture = Fixture::new();
+    let original = "a".repeat(480_000);
+    let agents = fixture.home.path().join("AGENTS.md");
+    fs::write(&agents, &original).unwrap();
+    let mut integration = fixture.integration();
+    integration.install().await.unwrap();
+    integration.uninstall().await.unwrap();
+    assert_eq!(fs::read_to_string(agents).unwrap(), original);
+}

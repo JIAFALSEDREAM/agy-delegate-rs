@@ -55,6 +55,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Action {
     Init,
+    /// Verify prerequisites, register MCP, and add managed delegation rules.
+    Install {
+        #[arg(long)]
+        codex_home: Option<PathBuf>,
+    },
     Register {
         #[arg(long)]
         codex_home: Option<PathBuf>,
@@ -148,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     if !matches!(cli.action, Action::Worker { .. }) {
         cli.config = match Config::load(cli.config_file.as_deref(), cli.config, &matches) {
             Ok(config) => config,
-            Err(error) if matches!(cli.action, Action::Doctor) => {
+            Err(error) if matches!(cli.action, Action::Doctor | Action::Install { .. }) => {
                 println!(
                     "{}",
                     serde_json::json!({"ok":false,"checks":[{"name":"configuration","ok":false,"detail":error.to_string()}]})
@@ -172,6 +177,18 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
     match cli.action {
+        Action::Install { codex_home } => {
+            let home = agy_delegate_rs::integration::home(codex_home.as_deref())?;
+            let report = agy_delegate_rs::doctor::diagnose_in(&cli.config, Some(&home)).await;
+            if report["ok"] != true {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                anyhow::bail!("Doctor checks failed; integration was not installed");
+            }
+            let value = agy_delegate_rs::integration::Integration::new(cli.config, Some(&home))?
+                .install()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Action::Register { codex_home } => {
             let value =
                 agy_delegate_rs::integration::Integration::new(cli.config, codex_home.as_deref())?
@@ -239,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Action::Run { .. }
                 | Action::Init
+                | Action::Install { .. }
                 | Action::Register { .. }
                 | Action::Uninstall { .. }
                 | Action::Doctor
