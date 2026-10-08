@@ -45,6 +45,27 @@ async fn fake_secret(body: &str, secret: Option<&str>) -> anyhow::Result<serde_j
 const SUCCESS: &str = "printf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'";
 
 #[tokio::test]
+async fn library_runner_rejects_invalid_log_limits_before_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        log_bytes: u64::MAX,
+        ..Config::default()
+    };
+    let error = runner::run(
+        &config,
+        dir.path(),
+        "inspect",
+        None,
+        dir.path(),
+        async |_| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("log_bytes"));
+    assert!(!dir.path().join("tmp").exists());
+}
+
+#[tokio::test]
 async fn wrapper_argv_precedes_managed_agy_options() {
     let state = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
