@@ -55,6 +55,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Action {
     Init,
+    Register {
+        #[arg(long)]
+        codex_home: Option<PathBuf>,
+    },
+    /// Stop all tasks in the configured state and remove this Codex home's integration.
+    Uninstall {
+        #[arg(long)]
+        codex_home: Option<PathBuf>,
+    },
     Doctor,
     Cleanup {
         #[arg(long)]
@@ -163,6 +172,20 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
     match cli.action {
+        Action::Register { codex_home } => {
+            let value =
+                agy_delegate_rs::integration::Integration::new(cli.config, codex_home.as_deref())?
+                    .register()
+                    .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        Action::Uninstall { codex_home } => {
+            let value =
+                agy_delegate_rs::integration::Integration::new(cli.config, codex_home.as_deref())?
+                    .uninstall()
+                    .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Action::Doctor => {
             let report = agy_delegate_rs::doctor::diagnose(&cli.config).await;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -216,6 +239,8 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Action::Run { .. }
                 | Action::Init
+                | Action::Register { .. }
+                | Action::Uninstall { .. }
                 | Action::Doctor
                 | Action::SandboxProbe { .. } => unreachable!(),
             };

@@ -22,7 +22,7 @@ async fn read(stream: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-async fn capture(command: Command) -> Result<(Vec<u8>, Vec<u8>)> {
+pub(crate) async fn capture(command: Command) -> Result<(Vec<u8>, Vec<u8>)> {
     capture_with_timeout(command, Duration::from_secs(10)).await
 }
 
