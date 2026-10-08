@@ -17,6 +17,9 @@ pub struct Config {
     pub codex: PathBuf,
     #[arg(long, default_value = "agy")]
     pub agy: PathBuf,
+    /// Arguments before agy's managed headless options; repeat for wrapper commands.
+    #[arg(long = "agy-arg", allow_hyphen_values = true)]
+    pub agy_args: Vec<String>,
     #[arg(long)]
     pub agy_env_file: Option<PathBuf>,
     #[arg(long)]
@@ -31,6 +34,8 @@ pub struct Config {
     pub retention_days: u64,
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(10..=10000))]
     pub max_history_jobs: u64,
+    #[arg(long, default_value_t = 4_000_000, value_parser = clap::value_parser!(u64).range(4096..=32_000_000))]
+    pub log_bytes: u64,
 }
 
 impl Default for Config {
@@ -38,6 +43,7 @@ impl Default for Config {
         Self {
             codex: "codex".into(),
             agy: "agy".into(),
+            agy_args: Vec::new(),
             agy_env_file: None,
             model: None,
             timeout: 600,
@@ -45,6 +51,7 @@ impl Default for Config {
             report_chars: 4000,
             retention_days: 14,
             max_history_jobs: 1000,
+            log_bytes: 4_000_000,
         }
     }
 }
@@ -95,6 +102,10 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (4096..=32_000_000).contains(&self.log_bytes),
+            "log_bytes must be 4096–32000000"
+        );
         ensure!((1..=7200).contains(&self.timeout), "timeout must be 1–7200");
         ensure!(
             (256..=6000).contains(&self.report_chars),
@@ -157,13 +168,15 @@ impl Config {
         override_fields!(
             codex,
             agy,
+            agy_args,
             agy_env_file,
             model,
             timeout,
             state_dir,
             report_chars,
             retention_days,
-            max_history_jobs
+            max_history_jobs,
+            log_bytes
         );
         config.validate()?;
         Ok(config)
@@ -272,6 +285,24 @@ impl Config {
             .env("TEMP", &tmp)
             .env("GIT_OPTIONAL_LOCKS", "0");
         Ok(command)
+    }
+    pub fn secrets(environment: &BTreeMap<OsString, OsString>) -> Result<Vec<String>> {
+        environment
+            .iter()
+            .filter(|(key, value)| {
+                let key = key.to_string_lossy().to_ascii_uppercase();
+                value.len() >= 8
+                    && ["KEY", "TOKEN", "SECRET"]
+                        .iter()
+                        .any(|marker| key.contains(marker))
+            })
+            .map(|(_, value)| {
+                value
+                    .to_str()
+                    .map(str::to_owned)
+                    .context("Credential environment values must be UTF-8")
+            })
+            .collect()
     }
 
     pub fn executable(

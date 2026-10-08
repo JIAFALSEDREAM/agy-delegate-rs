@@ -207,6 +207,7 @@ impl Jobs {
         Ok(())
     }
     pub fn submit(&self, task: &str, cwd: &Path, parent: Option<&str>) -> Result<Value> {
+        Config::secrets(&self.config.environment()?)?;
         ensure!(
             !task.trim().is_empty() && task.chars().count() <= 24000,
             "Task must contain 1–24000 characters"

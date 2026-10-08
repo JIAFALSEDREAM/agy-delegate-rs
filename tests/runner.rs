@@ -45,6 +45,39 @@ async fn fake_secret(body: &str, secret: Option<&str>) -> anyhow::Result<serde_j
 const SUCCESS: &str = "printf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'";
 
 #[tokio::test]
+async fn wrapper_argv_precedes_managed_agy_options() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let codex = state.path().join("codex");
+    std::fs::write(
+        &codex,
+        "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agy = state.path().join("agy.sh");
+    std::fs::write(&agy, format!("[ \"$1\" = 'wrapper argument' ] || exit 99\n[ \"$2\" = --input-format ] || exit 98\ncat >/dev/null\n{SUCCESS}\n")).unwrap();
+    let config = Config {
+        codex,
+        agy: "/bin/sh".into(),
+        agy_args: vec![agy.to_str().unwrap().into(), "wrapper argument".into()],
+        timeout: 2,
+        ..Config::default()
+    };
+    let result = runner::run(
+        &config,
+        repo.path(),
+        "inspect",
+        None,
+        state.path(),
+        async |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["status"], "succeeded");
+}
+
+#[tokio::test]
 async fn credential_redaction_cannot_hide_a_permission_denial() {
     let body = format!(
         "printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"tool_info\":{{\"error\":{{\"code\":\"SOFT_DENIED\"}}}}}}}}'\n{SUCCESS}"

@@ -90,6 +90,8 @@ fn malformed_unknown_and_out_of_range_settings_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("config.toml");
     for input in [
+        "log_bytes = 4095",
+        "log_bytes = 32000001",
         "timeout = 0",
         "report_chars = 6001",
         "retention_days = 366",
@@ -104,6 +106,33 @@ fn malformed_unknown_and_out_of_range_settings_are_rejected() {
         assert!(!error.contains("sensitive-fixture"));
     }
     assert!(load(&dir.path().join("missing"), &[]).is_err());
+}
+
+#[test]
+fn wrapper_arguments_and_log_limit_use_explicit_cli_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "agy = 'node'\nagy_args = ['/path/to/agy.js', '--wrapper']\nlog_bytes = 8192\n",
+    )
+    .unwrap();
+    let config = load(&path, &[]).unwrap();
+    assert_eq!(config.agy_args, ["/path/to/agy.js", "--wrapper"]);
+    let config = load(
+        &path,
+        &[
+            "--agy-arg",
+            "alternate.js",
+            "--agy-arg",
+            "--prefix",
+            "--log-bytes",
+            "4096",
+        ],
+    )
+    .unwrap();
+    assert_eq!(config.agy_args, ["alternate.js", "--prefix"]);
+    assert_eq!(config.log_bytes, 4096);
 }
 
 #[test]

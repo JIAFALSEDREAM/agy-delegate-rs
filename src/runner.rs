@@ -149,6 +149,7 @@ pub async fn run(
         .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
         .collect();
     cmd.arg(config.executable(&config.agy, &environment, &cwd))
+        .args(&config.agy_args)
         .args([
             "--input-format",
             "stream-json",
@@ -170,23 +171,7 @@ pub async fn run(
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let secrets: Vec<_> = cmd
-        .as_std()
-        .get_envs()
-        .filter_map(|(key, value)| {
-            let key = key.to_string_lossy();
-            value
-                .filter(|v| {
-                    v.len() >= 8
-                        && (key.contains("KEY") || key.contains("TOKEN") || key.contains("SECRET"))
-                })
-                .map(|v| {
-                    v.to_str()
-                        .map(str::to_owned)
-                        .context("Credential environment values must be UTF-8")
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let secrets = Config::secrets(&environment)?;
     let redactor = Arc::new(crate::redaction::Redactor::new(&secrets)?);
     let mut wrapped = CommandWrap::from(cmd);
     #[cfg(unix)]

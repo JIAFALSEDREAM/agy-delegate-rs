@@ -154,6 +154,9 @@ pub async fn diagnose(config: &Config) -> Value {
     };
     for (name, program) in [("agy", &config.agy), ("codex", &config.codex)] {
         let mut command = Command::new(config.executable(program, &environment, &cwd));
+        if name == "agy" {
+            command.args(&config.agy_args);
+        }
         command.envs(&environment).arg("--version");
         let found = match capture(command).await {
             Ok((stdout, stderr)) => version(&stdout).or_else(|| version(&stderr)),
@@ -162,6 +165,7 @@ pub async fn diagnose(config: &Config) -> Value {
         checks.push(json!({"name":name,"ok":found.is_some(),"version_core":found,"detail":"Numeric version core; executable must be available"}));
     }
     let mut help = Command::new(config.executable(&config.agy, &environment, &cwd));
+    help.args(&config.agy_args);
     help.envs(&environment).arg("--help");
     let flags = [
         "--input-format",
