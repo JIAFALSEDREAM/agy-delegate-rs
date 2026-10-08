@@ -6,9 +6,10 @@ use anyhow::{Context, Result, ensure};
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::fs::Dir;
 use fs2::FileExt;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -100,6 +101,15 @@ pub struct Jobs {
     pub config: Config,
     pub state: PathBuf,
     job_root: Arc<Dir>,
+}
+pub struct Shutdown {
+    jobs: Jobs,
+    lease: Arc<fs::File>,
+}
+impl Shutdown {
+    pub async fn stop_all(&self) -> Result<()> {
+        self.jobs.stop_all_locked(self.lease.clone()).await
+    }
 }
 struct SubmissionStop(Arc<AtomicBool>);
 impl Drop for SubmissionStop {
@@ -198,16 +208,24 @@ impl Jobs {
         Ok(db)
     }
     fn load(db: &Connection, id: &str) -> Result<Value> {
+        Self::load_optional(db, id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+            .context("Unknown job ID")
+    }
+    fn load_optional(db: &Connection, id: &str) -> Result<Option<Value>> {
         uuid::Uuid::parse_str(id).context("Invalid job ID")?;
-        let (data, updated): (String, f64) = db
+        let stored: Option<(String, f64)> = db
             .query_row("SELECT data,updated FROM jobs WHERE id=?1", [id], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .context("Unknown job ID")?;
+            .optional()?;
+        let Some((data, updated)) = stored else {
+            return Ok(None);
+        };
         let mut job: Value = serde_json::from_str(&data)?;
         ensure!(job.is_object(), "Invalid job record: expected object");
         job["updated"] = updated.into();
-        Ok(job)
+        Ok(Some(job))
     }
     pub fn get(&self, id: &str) -> Result<Value> {
         let db = self.db()?;
@@ -284,6 +302,7 @@ impl Jobs {
         detached: bool,
         abort: Option<&AtomicBool>,
     ) -> Result<(Value, RunCancel)> {
+        let _submission = self.submission_lease()?;
         Config::secrets(&self.config.environment()?)?;
         ensure!(
             !task.trim().is_empty() && task.chars().count() <= 24000,
@@ -520,6 +539,160 @@ impl Jobs {
             }
         }
         self.get(id)
+    }
+    fn state_lease(&self) -> Result<fs::File> {
+        let root = Dir::open_ambient_dir(&self.state, cap_std::ambient_authority())?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let lease = root.open_with(".shutdown.lock", &options)?.into_std();
+        ensure!(
+            lease.metadata()?.is_file(),
+            "Shutdown lock must be a regular file"
+        );
+        Ok(lease)
+    }
+    fn submission_lease(&self) -> Result<fs::File> {
+        let lease = self.state_lease()?;
+        fs2::FileExt::try_lock_shared(&lease)
+            .context("Task state is shutting down; retry later")?;
+        Ok(lease)
+    }
+    pub fn shutdown(&self) -> Result<Shutdown> {
+        let lease = self.state_lease()?;
+        lease
+            .try_lock_exclusive()
+            .context("Task submission or startup is active; retry shutdown")?;
+        Ok(Shutdown {
+            jobs: self.clone(),
+            lease: Arc::new(lease),
+        })
+    }
+    pub async fn stop_all(&self) -> Result<()> {
+        self.shutdown()?.stop_all().await
+    }
+    async fn stop_all_locked(&self, lease: Arc<fs::File>) -> Result<()> {
+        let jobs = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _ownership = lease;
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.read(true).write(true).create(true).follow(FollowSymlinks::No);
+            #[cfg(unix)] {
+                use cap_std::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NONBLOCK);
+            }
+            let cleanup = jobs.job_root.open_with(".cleanup.lock", &options)?.into_std();
+            ensure!(cleanup.metadata()?.is_file(), "Cleanup lock must be a regular file");
+            loop {
+                match fs2::FileExt::try_lock_shared(&cleanup) {
+                    Ok(()) => break,
+                    Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+                    Err(error) => return Err(error).context("Cannot wait for retention cleanup before shutdown"),
+                }
+            }
+            let db = jobs.db()?;
+            // Startup shares the shutdown lease, so queued workers cannot claim these records.
+            db.execute("UPDATE jobs SET status='cancelled',updated=?1,data=json_set(data,'$.status','cancelled','$.progress','cancelled before startup') WHERE status='starting'", [now()])?;
+            let mut query = db.prepare("SELECT id FROM jobs")?;
+            let ids = query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<HashSet<_>>>()?;
+            drop(query);
+            for entry in jobs.job_root.entries()? {
+                let entry = entry?;
+                let name = entry.file_name();
+                if name == ".cleanup.lock" && entry.file_type()?.is_file() { continue; }
+                if !name.to_str().is_some_and(|name| ids.contains(name)) || !entry.file_type()?.is_dir() {
+                    anyhow::bail!("Untracked task directory; cannot verify its sandbox stopped");
+                }
+            }
+            for id in &ids {
+                ensure!(std::time::Instant::now() < deadline, "Shutdown verification timeout");
+                let Some(job) = Self::load_optional(&db, id)? else {
+                    continue;
+                };
+                if active(&job) {
+                    jobs.cancel(id)?;
+                }
+            }
+            let mut pending = ids;
+            loop {
+                for id in pending.clone() {
+                    ensure!(std::time::Instant::now() < deadline, "Shutdown verification timeout");
+                    let Some(record) = Self::load_optional(&db, &id)? else {
+                        pending.remove(&id);
+                        continue;
+                    };
+                    let job = if active(&record) {
+                        jobs.get(&id)?
+                    } else {
+                        record.clone()
+                    };
+                    if active(&job) {
+                        continue;
+                    }
+                    ensure!(job["status"] != "orphaned", "Orphaned task ownership must be verified manually");
+                    ensure!(!sandbox_alive(&record), "Cannot verify task sandbox stopped; integration was preserved");
+                    // Cleanup may already have removed a terminal task directory.
+                    let child = match jobs.job_root.open_dir_nofollow(&id) {
+                        Ok(child) => child,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => { pending.remove(&id); continue; },
+                        Err(error) => return Err(error.into()),
+                    };
+                    let mut options = cap_std::fs::OpenOptions::new();
+                    options
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .follow(FollowSymlinks::No);
+                    #[cfg(unix)]
+                    {
+                        use cap_std::fs::OpenOptionsExt;
+                        options.custom_flags(libc::O_NONBLOCK);
+                    }
+                    let lease = child.open_with("owner.lock", &options)?.into_std();
+                    ensure!(
+                        lease.metadata()?.is_file(),
+                        "Task owner must be a regular file"
+                    );
+                    match lease.try_lock_exclusive() {
+                        Ok(()) => {
+                            let Some(record) = Self::load_optional(&db, &id)? else {
+                                pending.remove(&id);
+                                continue;
+                            };
+                            ensure!(
+                                !sandbox_alive(&record),
+                                "Cannot verify task sandbox stopped; cancel the task and retry"
+                            );
+                            pending.remove(&id);
+                        }
+                        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                            {}
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if pending.is_empty() {
+                    return Ok(());
+                }
+                ensure!(
+                    std::time::Instant::now() < deadline,
+                    "Cannot verify all tasks stopped; integration was preserved"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })
+        .await?
     }
     pub fn cleanup(&self, dry_run: bool) -> Result<Value> {
         self.cleanup_using(dry_run, |child, _| child.map_or(Ok(()), Self::remove_logs))
@@ -894,6 +1067,7 @@ impl Jobs {
         }
     }
     pub async fn worker(&self, id: &str) -> Result<()> {
+        let mut startup = Some(self.submission_lease()?);
         let mut job = Self::load(&self.db()?, id)?;
         let owner = owner(&job)?;
         owner
@@ -976,6 +1150,7 @@ impl Jobs {
                                 .await
                                 .context("Sandbox ownership was not persisted")?;
                         }
+                        drop(startup.take());
                     }
                     Ok(())
                 },
@@ -998,6 +1173,7 @@ impl Jobs {
                 }
             }
         };
+        drop(startup.take());
         drop(updates);
         if !persistence_finished
             && let Err(error) = persistence
