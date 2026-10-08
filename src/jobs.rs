@@ -903,6 +903,10 @@ impl Jobs {
         ensure!(claimed == 1, "Job was already claimed or is stopped");
         job = Self::load(&self.db()?, id)?;
         let config: Config = serde_json::from_value(job["config"].clone())?;
+        let cleanup_redactor = config
+            .environment()
+            .and_then(|environment| Config::secrets(&environment))
+            .and_then(|secrets| crate::redaction::Redactor::new(&secrets));
         let cwd = PathBuf::from(job["cwd"].as_str().context("Missing cwd")?);
         let dir = PathBuf::from(
             job["local_log_dir"]
@@ -1025,6 +1029,7 @@ impl Jobs {
             }
         }
         job["progress"] = "finished".into();
+        job["cleanup_status"] = "pending".into();
         self.save(&job)?;
         // Keep the worker lease until the synchronous reader has captured its complete result.
         let child = self.job_root.open_dir_nofollow(id)?;
@@ -1051,6 +1056,53 @@ impl Jobs {
             Ok(())
         })
         .await??;
+        // Sandbox and log finalization are done. Release the lease so retention counts this job.
+        drop(owner);
+        // Publish the result first. Retention never delays submit; status exposes its outcome.
+        let cleaner = Self {
+            config,
+            ..self.clone()
+        };
+        let cleanup_result = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let report = cleaner.cleanup(false)?;
+                if !report["skipped"].as_array().is_some_and(|skipped| {
+                    skipped
+                        .iter()
+                        .any(|entry| entry["reason"] == "cleanup_active")
+                }) {
+                    return Ok(report);
+                }
+                ensure!(
+                    std::time::Instant::now() < deadline,
+                    "Automatic cleanup remained busy"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+        .await;
+        let cleanup_report = match cleanup_result {
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => json!({"ok":false,"error":format!("{error:#}")}),
+            Err(error) => json!({"ok":false,"error":format!("Cleanup worker failed: {error}")}),
+        };
+        let cleaned = cleanup_report["ok"] == true;
+        job["cleanup_status"] = if cleaned { "completed" } else { "failed" }.into();
+        if !cleaned {
+            job["cleanup_warning"] = match cleanup_redactor {
+                Ok(redactor) => {
+                    let mut warning = cleanup_report;
+                    redactor.value(&mut warning);
+                    warning.to_string().chars().take(2000).collect::<String>()
+                }
+                Err(_) => "Cleanup failed; diagnostics withheld because credential redaction was unavailable".into(),
+            }.into();
+        }
+        self.db()?.execute(
+            "UPDATE jobs SET data=json_set(data,'$.cleanup_status',?1,'$.cleanup_warning',json(?2)) WHERE id=?3 AND status!='purging'",
+            params![job["cleanup_status"].as_str(), job["cleanup_warning"].to_string(), id],
+        )?;
         Ok(())
     }
 }
