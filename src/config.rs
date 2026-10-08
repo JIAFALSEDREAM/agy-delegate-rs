@@ -101,6 +101,21 @@ impl Config {
         }
     }
 
+    pub fn absolutize(&mut self) -> Result<()> {
+        self.validate()?;
+        let cwd = std::env::current_dir()?;
+        self.resolve_paths(&cwd);
+        self.state_dir = Some(self.state()?);
+        let environment = self.lookup_environment()?;
+        self.codex = self.executable(&self.codex, &environment, &cwd);
+        self.agy = self.executable(&self.agy, &environment, &cwd);
+        ensure!(
+            self.codex.is_absolute() && self.agy.is_absolute(),
+            "Cannot resolve Codex and agy executables to absolute paths"
+        );
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (4096..=32_000_000).contains(&self.log_bytes),
@@ -205,13 +220,14 @@ impl Config {
     }
 
     pub fn state(&self) -> Result<PathBuf> {
-        let default = directories::ProjectDirs::from("", "", "agy-delegate-rs")
-            .context("Cannot find user data directory")?;
-        private_dir(
-            self.state_dir
-                .as_deref()
-                .unwrap_or(default.data_local_dir()),
-        )
+        match &self.state_dir {
+            Some(path) => private_dir(path),
+            None => private_dir(
+                directories::ProjectDirs::from("", "", "agy-delegate-rs")
+                    .context("Cannot find user data directory")?
+                    .data_local_dir(),
+            ),
+        }
     }
 
     pub fn environment(&self) -> Result<BTreeMap<OsString, OsString>> {
@@ -229,6 +245,22 @@ impl Config {
             }
         }
         Ok(env)
+    }
+
+    /// Executable lookup uses only PATH from an available environment file.
+    /// Missing credentials must not prevent registration or removal.
+    pub fn lookup_environment(&self) -> Result<BTreeMap<OsString, OsString>> {
+        let mut inherited = self.clone();
+        inherited.agy_env_file = None;
+        let mut environment = inherited.environment()?;
+        let key = env_key("PATH".into());
+        if !environment.contains_key(&key)
+            && let Ok(effective) = self.environment()
+            && let Some(path) = effective.get(&key)
+        {
+            environment.insert(key, path.clone());
+        }
+        Ok(environment)
     }
 
     pub fn sandbox(&self, cwd: &Path, tmp: &Path) -> Result<Command> {
