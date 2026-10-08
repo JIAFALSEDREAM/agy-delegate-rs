@@ -12,7 +12,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::process::Command;
@@ -98,6 +101,60 @@ pub struct Jobs {
     pub state: PathBuf,
     job_root: Arc<Dir>,
 }
+struct SubmissionStop(Arc<AtomicBool>);
+impl Drop for SubmissionStop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+fn mark_cancel(dir: &Dir) -> Result<()> {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    match dir.open_with("cancel", &options) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+struct RunCancel {
+    dir: Dir,
+    armed: bool,
+    _result: Option<fs::File>,
+    _startup: Option<fs::File>,
+}
+impl RunCancel {
+    fn protect_failed_start(&mut self) -> Result<()> {
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = self.dir.open_with("owner.lock", &options)?.into_std();
+        ensure!(
+            file.metadata()?.is_file(),
+            "Task owner must be a regular file"
+        );
+        file.try_lock_exclusive()?;
+        self._startup = Some(file);
+        Ok(())
+    }
+}
+impl Drop for RunCancel {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = mark_cancel(&self.dir);
+        }
+    }
+}
 
 impl Jobs {
     pub fn new(mut config: Config) -> Result<Self> {
@@ -123,7 +180,16 @@ impl Jobs {
             state,
             job_root,
         };
-        jobs.db()?.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, root TEXT, status TEXT, updated REAL, data TEXT); CREATE INDEX IF NOT EXISTS jobs_root_status ON jobs(root,status); CREATE INDEX IF NOT EXISTS jobs_live_root_id_v2 ON jobs(root,id) WHERE status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked','incomplete');")?;
+        let db = jobs.db()?;
+        db.busy_timeout(Duration::from_millis(100))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, root TEXT, status TEXT, updated REAL, data TEXT); CREATE INDEX IF NOT EXISTS jobs_root_status ON jobs(root,status); CREATE INDEX IF NOT EXISTS jobs_live_root_id_v2 ON jobs(root,id) WHERE status NOT IN ('succeeded','failed','cancelled','timed_out','interrupted','blocked','incomplete');") {
+                Ok(()) => break,
+                Err(error) if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)) && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+                Err(error) => return Err(error).context("Cannot initialize task database"),
+            }
+        }
         Ok(jobs)
     }
     fn db(&self) -> Result<Connection> {
@@ -207,6 +273,17 @@ impl Jobs {
         Ok(())
     }
     pub fn submit(&self, task: &str, cwd: &Path, parent: Option<&str>) -> Result<Value> {
+        self.submit_using(task, cwd, parent, true, None)
+            .map(|(job, _)| job)
+    }
+    fn submit_using(
+        &self,
+        task: &str,
+        cwd: &Path,
+        parent: Option<&str>,
+        detached: bool,
+        abort: Option<&AtomicBool>,
+    ) -> Result<(Value, RunCancel)> {
         Config::secrets(&self.config.environment()?)?;
         ensure!(
             !task.trim().is_empty() && task.chars().count() <= 24000,
@@ -217,6 +294,10 @@ impl Jobs {
         if let Some(parent) = parent {
             self.get(parent)?;
             let old = Self::load(&self.db()?, parent)?;
+            ensure!(
+                !sandbox_alive(&old),
+                "Previous task sandbox has not stopped; cancel it and verify ownership before follow-up"
+            );
             let db = self.db()?;
             let mut query = db.prepare("SELECT id FROM jobs WHERE root=?1 AND status IN ('starting','running','cancelling','purging')")?;
             let ids = query
@@ -226,8 +307,22 @@ impl Jobs {
                 self.get(&id)?;
             }
         }
-        let mut db = self.db()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let db = self.db()?;
+        db.busy_timeout(Duration::from_millis(50))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let tx = loop {
+            ensure!(
+                !abort.is_some_and(|flag| flag.load(Ordering::Relaxed)),
+                "Task submission interrupted"
+            );
+            match rusqlite::Transaction::new_unchecked(&db, TransactionBehavior::Immediate) {
+                Ok(tx) => break tx,
+                Err(error)
+                    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                        && std::time::Instant::now() < deadline => {}
+                Err(error) => return Err(error.into()),
+            }
+        };
         let id = uuid::Uuid::new_v4().to_string();
         let (root, conversation) = if let Some(parent) = parent {
             let old = Self::load(&tx, parent)?;
@@ -264,8 +359,32 @@ impl Jobs {
             "INSERT INTO jobs VALUES (?1,?2,?3,?4,?5)",
             params![id, root, "starting", now(), serde_json::to_string(&job)?],
         )?;
+        let job_dir = self.job_root.open_dir_nofollow(&id)?;
+        let result_lease = if detached {
+            None
+        } else {
+            let mut options = cap_std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            let lease = job_dir.open_with("result.lock", &options)?.into_std();
+            lease.try_lock_exclusive()?;
+            Some(lease)
+        };
+        let mut submission_cancel = RunCancel {
+            dir: job_dir,
+            armed: !detached,
+            _result: result_lease,
+            _startup: None,
+        };
         tx.commit()?;
         let start = (|| -> Result<()> {
+            ensure!(
+                !abort.is_some_and(|flag| flag.load(Ordering::Relaxed)),
+                "Task submission interrupted"
+            );
             let mut cmd = Command::new(std::env::current_exe()?);
             cmd.arg("--state-dir")
                 .arg(&self.state)
@@ -278,12 +397,19 @@ impl Jobs {
             Ok(())
         })();
         if let Err(error) = start {
+            submission_cancel.protect_failed_start()?;
             let mut job = job;
-            job["status"] = "failed".into();
+            job["status"] = if abort.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                "cancelled"
+            } else {
+                "failed"
+            }
+            .into();
             job["error"] = error.to_string().into();
             self.save(&job)?;
         }
-        self.get(&id)
+        let result = self.get(&id)?;
+        Ok((result, submission_cancel))
     }
     pub fn followup(&self, id: &str, message: &str) -> Result<Value> {
         self.get(id)?;
@@ -300,13 +426,60 @@ impl Jobs {
             Some(id),
         )
     }
+    pub async fn run(&self, task: &str, cwd: &Path) -> Result<Value> {
+        let interrupt = tokio::signal::ctrl_c();
+        tokio::pin!(interrupt);
+        tokio::select! {
+            biased;
+            signal = &mut interrupt => { signal?; anyhow::bail!("Run interrupted before submission"); }
+            _ = tokio::task::yield_now() => {}
+        }
+        let aborted = Arc::new(AtomicBool::new(false));
+        let _submission_stop = SubmissionStop(aborted.clone());
+        let submitter = self.clone();
+        let input = task.to_owned();
+        let project = cwd.to_owned();
+        let submission = tokio::task::spawn_blocking(move || {
+            submitter.submit_using(&input, &project, None, false, Some(&aborted))
+        });
+        tokio::pin!(submission);
+        let (submitted, mut owner) = tokio::select! {
+            submitted = &mut submission => submitted.context("Task submission panicked")??,
+            signal = &mut interrupt => { signal?; anyhow::bail!("Run interrupted during submission"); }
+        };
+        let id = submitted["id"]
+            .as_str()
+            .context("Missing submitted job ID")?;
+        let mut cancelled = false;
+        async {
+            loop {
+                let job = tokio::select! {
+                    job = self.wait(id, 55) => job?,
+                    signal = &mut interrupt, if !cancelled => {
+                        cancelled = true;
+                        signal?;
+                        let canceller = self.clone();
+                        let key = id.to_owned();
+                        tokio::task::spawn_blocking(move || canceller.cancel(&key)).await??;
+                        continue;
+                    }
+                };
+                if !active(&job) {
+                    owner.armed = false;
+                    let reader = self.clone();
+                    let key = id.to_owned();
+                    let full = tokio::task::spawn_blocking(move || Self::load(&reader.db()?, &key)).await??;
+                    return Ok::<Value, anyhow::Error>(json!({"id":id,"status":full["status"],"response":full["report"],"error":full["error"],
+                        "exit_code":full["exit_code"],"usage":full["usage"],"conversation_id":full["conversation"],
+                        "local_log_dir":full["local_log_dir"],"cleanup_status":full["cleanup_status"],"cleanup_warning":full["cleanup_warning"]}));
+                }
+            }
+        }.await.with_context(||format!("Synchronous task {id} did not finish normally"))
+    }
     pub fn cancel(&self, id: &str) -> Result<Value> {
         let job = Self::load(&self.db()?, id)?;
         if active(&job) {
-            fs::write(
-                Path::new(job["local_log_dir"].as_str().unwrap()).join("cancel"),
-                "cancel",
-            )?;
+            mark_cancel(&self.job_root.open_dir_nofollow(id)?)?;
             #[cfg(unix)]
             {
                 let lease = owner(&job)?;
@@ -762,13 +935,15 @@ impl Jobs {
             Ok::<(), anyhow::Error>(())
         });
         let mut persistence_finished = false;
+        let stop_runner = AtomicBool::new(false);
         let mut result = {
-            let future = runner::run(
+            let future = runner::run_with_stop(
                 &config,
                 &cwd,
                 &task,
                 conversation.as_deref(),
                 &dir,
+                &stop_runner,
                 async |event| {
                     let started = event["event"] == "sandbox_started";
                     if event["conversation_id"].is_string() {
@@ -806,11 +981,16 @@ impl Jobs {
                 value = &mut future => value,
                 stored = &mut persistence => {
                     persistence_finished = true;
-                    Err(match stored {
+                    let error = match stored {
                         Err(error) => error.into(),
                         Ok(Err(error)) => error,
                         Ok(Ok(())) => anyhow::anyhow!("Task persistence stopped unexpectedly"),
-                    })
+                    };
+                    stop_runner.store(true, Ordering::Relaxed);
+                    match future.await {
+                        Err(cleanup) => Err(error.context(format!("Runner shutdown failed: {cleanup:#}"))),
+                        Ok(_) => Err(error),
+                    }
                 }
             }
         };
@@ -841,17 +1021,146 @@ impl Jobs {
             }
             Err(error) => {
                 job["status"] = "failed".into();
-                job["error"] = error.to_string().into();
+                job["error"] = format!("{error:#}").into();
             }
         }
         job["progress"] = "finished".into();
-        self.save(&job)
+        self.save(&job)?;
+        // Keep the worker lease until the synchronous reader has captured its complete result.
+        let child = self.job_root.open_dir_nofollow(id)?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.read(true).write(true).follow(FollowSymlinks::No);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NONBLOCK);
+            }
+            match child.open_with("result.lock", &options) {
+                Ok(file) => {
+                    let file = file.into_std();
+                    ensure!(
+                        file.metadata()?.is_file(),
+                        "Result lease must be a regular file"
+                    );
+                    file.lock_exclusive()?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            Ok(())
+        })
+        .await??;
+        Ok(())
     }
 }
 
 #[cfg(all(test, unix))]
 mod cleanup_concurrency {
     use super::*;
+    #[test]
+    fn failed_start_result_is_retained_until_its_reader_releases_ownership() {
+        let state = tempfile::tempdir().unwrap();
+        let jobs = Jobs::new(Config {
+            state_dir: Some(state.path().into()),
+            ..Config::default()
+        })
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = jobs.state.join("jobs").join(&id);
+        fs::create_dir(&path).unwrap();
+        let mut guard = RunCancel {
+            dir: jobs.job_root.open_dir_nofollow(&id).unwrap(),
+            armed: false,
+            _result: None,
+            _startup: None,
+        };
+        guard.protect_failed_start().unwrap();
+        let job = json!({"id":id,"root_id":id,"status":"failed","local_log_dir":path,"error":"Cannot spawn worker"});
+        jobs.db()
+            .unwrap()
+            .execute(
+                "INSERT INTO jobs VALUES(?1,?1,'failed',0,?2)",
+                params![id, job.to_string()],
+            )
+            .unwrap();
+        let cleaner = jobs.clone();
+        std::thread::spawn(move || cleaner.cleanup(false).unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(jobs.get(&id).unwrap()["status"], "failed");
+        drop(guard);
+        assert_eq!(jobs.cleanup(false).unwrap()["deleted_ids"], json!([id]));
+    }
+    #[test]
+    fn cancellation_guard_uses_pinned_directory_and_never_truncates_existing_markers() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("job");
+        fs::create_dir(&path).unwrap();
+        let root = Dir::open_ambient_dir(&path, cap_std::ambient_authority()).unwrap();
+        fs::rename(&path, state.path().join("original")).unwrap();
+        fs::create_dir(&path).unwrap();
+        let victim = state.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, path.join("cancel")).unwrap();
+        drop(RunCancel {
+            dir: root,
+            armed: true,
+            _result: None,
+            _startup: None,
+        });
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(state.path().join("original/cancel").is_file());
+        fs::remove_file(path.join("cancel")).unwrap();
+        fs::hard_link(&victim, path.join("cancel")).unwrap();
+        let root = Dir::open_ambient_dir(&path, cap_std::ambient_authority()).unwrap();
+        drop(RunCancel {
+            dir: root,
+            armed: true,
+            _result: None,
+            _startup: None,
+        });
+        assert_eq!(fs::read_to_string(victim).unwrap(), "keep");
+    }
+    #[tokio::test]
+    async fn dropping_a_synchronous_run_requests_cancellation_of_its_submitted_job() {
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let jobs = Jobs::new(Config {
+            codex: state.path().join("missing-backend"),
+            state_dir: Some(state.path().into()),
+            ..Config::default()
+        })
+        .unwrap();
+        let id = {
+            let mut running = Box::pin(jobs.run("inspect", repo.path()));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                tokio::select! {
+                    result = &mut running => panic!("Run ended before cancellation: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+                let listed = jobs.list(1).unwrap();
+                if let Some(id) = listed[0]["id"].as_str() {
+                    let log = jobs.state.join("jobs").join(id).join("worker.log");
+                    // The test executable rejects worker argv, proving launch has happened.
+                    if fs::metadata(log).is_ok_and(|meta| meta.len() > 0) {
+                        break id.to_owned();
+                    }
+                }
+                assert!(std::time::Instant::now() < deadline);
+            }
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !jobs.state.join("jobs").join(&id).join("cancel").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(matches!(
+            jobs.get(&id).unwrap()["status"].as_str(),
+            Some("cancelling" | "cancelled")
+        ));
+    }
     #[test]
     fn removal_uses_the_verified_handle_after_job_directory_substitution() {
         let state = tempfile::tempdir().unwrap();

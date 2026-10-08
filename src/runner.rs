@@ -43,13 +43,17 @@ impl Drop for PipeTask {
     }
 }
 
-async fn notify(future: impl Future<Output = Result<()>>, cancel: &Path) -> Result<bool> {
+async fn notify(
+    future: impl Future<Output = Result<()>>,
+    cancel: &Path,
+    stop: &AtomicBool,
+) -> Result<bool> {
     tokio::pin!(future);
     loop {
         tokio::select! {
             result = &mut future => return result.map(|()|true),
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                if cancel.exists() { return Ok(false); }
+                if cancel.exists() || stop.load(Ordering::Relaxed) { return Ok(false); }
             }
         }
     }
@@ -135,9 +139,31 @@ pub async fn run(
     task: &str,
     conversation: Option<&str>,
     dir: &Path,
+    progress: impl AsyncFnMut(Value) -> Result<()>,
+) -> Result<Value> {
+    run_with_stop(
+        config,
+        cwd,
+        task,
+        conversation,
+        dir,
+        &AtomicBool::new(false),
+        progress,
+    )
+    .await
+}
+
+pub(crate) async fn run_with_stop(
+    config: &Config,
+    cwd: &Path,
+    task: &str,
+    conversation: Option<&str>,
+    dir: &Path,
+    stop: &AtomicBool,
     mut progress: impl AsyncFnMut(Value) -> Result<()>,
 ) -> Result<Value> {
-    if dir.join("cancel").exists() {
+    config.validate()?;
+    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
         return Ok(json!({"status":"cancelled"}));
     }
     let cwd = cwd.canonicalize()?;
@@ -236,6 +262,7 @@ pub async fn run(
         if !notify(
             progress(json!({"event":"sandbox_started","pid":child.0.id()})),
             &dir.join("cancel"),
+            stop,
         )
         .await?
         {
@@ -265,6 +292,7 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
                 Ok(())
             },
             &dir.join("cancel"),
+            stop,
         )
         .await?
         {
@@ -275,7 +303,7 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
         let mut bytes = 0;
         let mut frame = Vec::new();
         loop {
-            if dir.join("cancel").exists() {
+            if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
                 return Ok(json!({"status":"cancelled"}));
             }
             tokio::select! {
@@ -293,7 +321,7 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
                         ensure!(terminal.is_none() && event["result"].is_object(), "Invalid or duplicate terminal result");
                         terminal = Some(event["result"].clone());
                     }
-                    if !notify(progress(event), &dir.join("cancel")).await? { return Ok(json!({"status":"cancelled"})); }
+                    if !notify(progress(event), &dir.join("cancel"), stop).await? { return Ok(json!({"status":"cancelled"})); }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {}
             }
@@ -302,7 +330,7 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
             tokio::select! {
                 exit = child.0.wait() => return Ok(classify(exit?.code().unwrap_or(-1),terminal)),
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                    if dir.join("cancel").exists() { return Ok(json!({"status":"cancelled"})); }
+                    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) { return Ok(json!({"status":"cancelled"})); }
                 }
             }
         }

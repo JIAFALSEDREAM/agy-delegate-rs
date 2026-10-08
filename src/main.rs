@@ -1,8 +1,4 @@
-use agy_delegate_rs::{
-    config::{Config, private_dir},
-    jobs::Jobs,
-    runner,
-};
+use agy_delegate_rs::{config::Config, jobs::Jobs};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::{
     io::{Read, Write},
@@ -174,13 +170,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Action::Run { cwd, .. } => {
             let task = task.unwrap();
-            let dir = private_dir(
-                &cli.config
-                    .state()?
-                    .join(format!("run-{}", uuid::Uuid::new_v4())),
-            )?;
-            let result =
-                runner::run(&cli.config, &cwd, &task, None, &dir, async |_| Ok(())).await?;
+            let result = Jobs::new(cli.config)?.run(&task, &cwd).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             anyhow::ensure!(
                 result["status"] == "succeeded",
