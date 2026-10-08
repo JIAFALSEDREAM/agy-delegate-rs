@@ -4,6 +4,42 @@ use common::{CommandExt, backend, invoke};
 use serde_json::Value;
 use std::{fs, path::Path, process::Command};
 
+#[tokio::test]
+async fn exiting_leader_does_not_leave_a_descendant_reopening_raw_logs() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let script = state.path().join("agy.sh");
+    let pidfile = state.path().join("descendant");
+    fs::write(&script, format!("while [ \"$1\" != --log-file ]; do shift; done\nshift\ncat >/dev/null\n(while :; do printf private-descendant-fixture > \"$1\"; done) >/dev/null 2>&1 &\necho $! > '{}'\nprintf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"response\":\"ok\"}}}}'\n",pidfile.display())).unwrap();
+    let config = agy_delegate_rs::config::Config {
+        codex: backend(state.path()),
+        agy: "/bin/sh".into(),
+        agy_args: vec![script.to_str().unwrap().into()],
+        ..Default::default()
+    };
+    let result = agy_delegate_rs::runner::run(
+        &config,
+        repo.path(),
+        "inspect",
+        None,
+        state.path(),
+        async |_| Ok(()),
+    )
+    .await;
+    let pid: i32 = fs::read_to_string(pidfile).unwrap().trim().parse().unwrap();
+    // A lingering zombie group may prevent verification: this must retain privately and fail.
+    match result {
+        Ok(value) => {
+            assert_eq!(value["status"], "succeeded");
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        }
+        Err(error) => {
+            assert!(format!("{error:#}").contains("termination unverified"));
+            assert!(state.path().join("tmp/UNVERIFIED_PROCESS").is_file());
+        }
+    }
+}
+
 #[test]
 fn dropped_runner_stops_reopening_backend_before_disposing_its_raw_log() {
     let state = tempfile::tempdir().unwrap();
@@ -111,5 +147,70 @@ fn worker_database_failure_stops_sandbox_and_disposes_raw_log() {
         !fs::read_to_string(log)
             .unwrap_or_default()
             .contains("private-log-fixture-value")
+    );
+}
+
+#[test]
+fn growing_and_already_completed_agy_logs_are_bounded_and_redacted() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let script = state.path().join("agy.sh");
+    for wait in [false, true] {
+        fs::write(&script, format!("while [ \"$1\" != --log-file ]; do shift; done\nshift\nhead -c 5000 /dev/zero > \"$1\"\ncat >/dev/null\n{}\nprintf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"response\":\"ok\"}}}}'\n", if wait {"sleep 30"} else {""})).unwrap();
+        let start = std::time::Instant::now();
+        let output = invoke(state.path(), repo.path(), &script, "inspect");
+        assert!(!output.status.success());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["status"], "failed");
+        assert!(result["error"].as_str().unwrap().contains("log"));
+        let log = Path::new(result["local_log_dir"].as_str().unwrap()).join("tmp/agy.log");
+        assert!(fs::metadata(log).unwrap().len() <= 4096);
+    }
+}
+
+#[test]
+fn completed_logs_redact_credentials_and_cannot_redirect_host_writes() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let script = state.path().join("agy.sh");
+    let victim = state.path().join("outside.txt");
+    fs::write(&victim, "keep me").unwrap();
+    fs::write(&script, format!("while [ \"$1\" != --log-file ]; do shift; done\nshift\nln -s '{}' \"$1\"\ncat >/dev/null\nprintf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"response\":\"ok\"}}}}'\n", victim.display())).unwrap();
+    let output = invoke(state.path(), repo.path(), &script, "inspect");
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+    fs::write(&script, format!("while [ \"$1\" != --log-file ]; do shift; done\nshift\nln '{}' \"$1\"\ncat >/dev/null\nprintf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"response\":\"ok\"}}}}'\n", victim.display())).unwrap();
+    let output = invoke(state.path(), repo.path(), &script, "inspect");
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let log = Path::new(result["local_log_dir"].as_str().unwrap()).join("tmp/agy.log");
+    fs::write(log, "independent log").unwrap();
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+    fs::write(&script, "while [ \"$1\" != --log-file ]; do shift; done\nshift\nprintf '%s' \"$FIXTURE_SECRET\" > \"$1\"\ncat >/dev/null\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"))
+        .arg("--state-dir")
+        .arg(state.path())
+        .arg("--codex")
+        .arg(backend(state.path()))
+        .args(["--agy", "/bin/sh", "--agy-arg"])
+        .arg(&script)
+        .env("FIXTURE_SECRET", "private-log-fixture-value")
+        .args(["run", "--cwd"])
+        .arg(repo.path())
+        .args(["--task", "inspect"])
+        .bounded_output();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        fs::read_to_string(
+            Path::new(result["local_log_dir"].as_str().unwrap()).join("tmp/agy.log")
+        )
+        .unwrap(),
+        "[REDACTED]"
     );
 }
