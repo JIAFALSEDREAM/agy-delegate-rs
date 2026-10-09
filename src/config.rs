@@ -36,6 +36,9 @@ pub struct Config {
     pub max_history_jobs: u64,
     #[arg(long, default_value_t = 4_000_000, value_parser = clap::value_parser!(u64).range(4096..=32_000_000))]
     pub log_bytes: u64,
+    /// Maximum total file bytes in each managed conversation directory.
+    #[arg(long, default_value_t = 128_000_000, value_parser = clap::value_parser!(u64).range(1_000_000..=1_000_000_000))]
+    pub profile_bytes: u64,
 }
 
 impl Default for Config {
@@ -52,6 +55,7 @@ impl Default for Config {
             retention_days: 14,
             max_history_jobs: 1000,
             log_bytes: 4_000_000,
+            profile_bytes: 128_000_000,
         }
     }
 }
@@ -117,6 +121,10 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1_000_000..=1_000_000_000).contains(&self.profile_bytes),
+            "profile_bytes must be 1000000–1000000000"
+        );
         ensure!(
             (4096..=32_000_000).contains(&self.log_bytes),
             "log_bytes must be 4096–32000000"
@@ -191,7 +199,8 @@ impl Config {
             report_chars,
             retention_days,
             max_history_jobs,
-            log_bytes
+            log_bytes,
+            profile_bytes
         );
         config.validate()?;
         Ok(config)

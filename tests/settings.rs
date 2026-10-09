@@ -92,6 +92,8 @@ fn malformed_unknown_and_out_of_range_settings_are_rejected() {
     for input in [
         "log_bytes = 4095",
         "log_bytes = 32000001",
+        "profile_bytes = 999999",
+        "profile_bytes = 1000000001",
         "timeout = 0",
         "report_chars = 6001",
         "retention_days = 366",
@@ -164,6 +166,7 @@ fn cli_loads_file_before_opening_the_task_database() {
 fn legacy_job_settings_remain_readable_and_reports_use_the_current_limit() {
     let legacy: Config = serde_json::from_value(json!({"codex":"codex","agy":"agy","agy_env_file":null,"model":null,"timeout":2,"state_dir":null})).unwrap();
     assert_eq!(legacy.max_history_jobs, 1000);
+    assert_eq!(legacy.profile_bytes, 128_000_000);
     let state = tempfile::tempdir().unwrap();
     let jobs = Jobs::new(Config {
         state_dir: Some(state.path().into()),

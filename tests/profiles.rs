@@ -73,3 +73,57 @@ fn private_profiles_reuse_history_and_preserve_shared_login() {
     assert_eq!(fs::read(shared.join("settings.json")).unwrap(), b"{}");
     assert_eq!(fs::read(shared.join("personal.db")).unwrap(), b"keep");
 }
+
+#[test]
+fn aggregate_quota_stops_a_running_process_and_rejects_fast_success() {
+    for (ending, expected) in [
+        ("exec sleep 30\n", "failed"),
+        (SUCCESS, "failed"),
+        (
+            "printf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"fixture\"}}'\necho backend-fixture-error >&2\nexit 7\n",
+            "failed",
+        ),
+        (
+            "touch \"$profile/../../jobs/${profile##*/}/cancel\"\nexec sleep 30\n",
+            "cancelled",
+        ),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let script = state.path().join("agy.sh");
+        fs::write(&script, format!("{PARSE}echo $$ > \"$profile/pid\"\nmkdir \"$profile/nested\"\ntruncate -s 600000 \"$profile/one\"\ntruncate -s 600000 \"$profile/nested/two\"\n{ending}")).unwrap();
+        let result = report(
+            command(state.path(), home.path(), &script)
+                .args(["--profile-bytes", "1000000", "run", "--cwd"])
+                .arg(repo.path())
+                .args(["--task", "quota"])
+                .bounded_output(),
+        );
+        assert_eq!(result["status"], expected);
+        assert!(result["error"].as_str().unwrap().contains("profile_bytes"));
+        if ending.contains("backend-fixture-error") {
+            assert!(
+                result["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("backend-fixture-error")
+            );
+        }
+        let pid = state
+            .path()
+            .join("conversations")
+            .join(result["id"].as_str().unwrap())
+            .join("pid");
+        {
+            let pid =
+                fs::read_to_string(pid).expect("fixture must publish PID before exceeding quota");
+            let pid: i32 = pid.trim().parse().unwrap();
+            assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
+}

@@ -349,6 +349,18 @@ pub(crate) struct RunPaths<'a> {
     pub profile: Option<(&'a crate::profiles::Profiles, &'a str)>,
 }
 
+async fn profile_usage(profile: &crate::profiles::Profile, limit: u64) -> Result<()> {
+    let root = profile.directory.clone();
+    let bytes = tokio::task::spawn_blocking(move || crate::tree::usage(&root, limit))
+        .await
+        .context("Conversation size scan panicked")??;
+    ensure!(
+        bytes <= limit,
+        "Conversation directory exceeded configured profile_bytes limit"
+    );
+    Ok(())
+}
+
 pub(crate) async fn run_with_stop(
     config: &Config,
     cwd: &Path,
@@ -367,17 +379,34 @@ pub(crate) async fn run_with_stop(
     let tmp = private_dir(&dir.join("tmp"))?;
     let log_root = Arc::new(Dir::open_ambient_dir(&tmp, cap_std::ambient_authority())?);
     let raw_log = RawLog(log_root.clone(), true);
-    let profile = if let Some((profiles, id)) = paths.profile {
+    let prepared = if let Some((profiles, id)) = paths.profile {
         let profiles = profiles.clone();
         let id = id.to_owned();
         // Always join preparation before returning, retaining the worker's ownership lease.
-        Some(tokio::task::spawn_blocking(move || profiles.prepare(&id)).await??)
+        tokio::task::spawn_blocking(move || profiles.prepare(&id))
+            .await
+            .context("Conversation preparation panicked")
+            .and_then(|result| result)
+            .map(Some)
     } else {
-        None
+        Ok(None)
     };
     if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
-        return Ok(json!({"status":"cancelled"}));
+        return Ok(
+            json!({"status":"cancelled","error":prepared.err().map(|error| format!("Conversation preparation: {error:#}"))}),
+        );
     }
+    let profile = prepared?;
+    let initial_scan = match &profile {
+        Some(profile) => profile_usage(profile, config.profile_bytes).await,
+        None => Ok(()),
+    };
+    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
+        return Ok(
+            json!({"status":"cancelled","error":initial_scan.err().map(|error| format!("Initial conversation check: {error:#}"))}),
+        );
+    }
+    initial_scan?;
     let mut cmd = config.sandbox_profile(
         &cwd,
         &tmp,
@@ -566,8 +595,28 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
+    let mut profile_scan = None;
+    let profile_guard = async {
+        if let Some(profile) = &profile {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let root = profile.directory.clone();
+                let limit = config.profile_bytes;
+                profile_scan = Some(tokio::task::spawn_blocking(move || {
+                    crate::tree::usage(&root, limit)
+                }));
+                let scanned = profile_scan.as_mut().unwrap().await;
+                profile_scan.take();
+                ensure!(
+                    scanned.context("Conversation size scan panicked")?? <= limit,
+                    "Conversation directory exceeded configured profile_bytes limit"
+                );
+            }
+        }
+        std::future::pending::<Result<Value>>().await
+    };
     let outcome = tokio::time::timeout(Duration::from_secs(config.timeout + 5), async {
-        tokio::select! { result = outcome => result, result = log_guard => result }
+        tokio::select! { result = outcome => result, result = log_guard => result, result = profile_guard => result }
     })
     .await;
     let result = match outcome {
@@ -575,7 +624,12 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
         Ok(Err(error)) => Err(error),
         Err(_) => Ok(json!({"status":"timed_out","error":"Task deadline exceeded"})),
     };
-    let raw_log = child.stop().await?;
+    let stopped = child.stop().await;
+    // Join even on a failed stop. A cancelled blocking scan must not outlive worker ownership.
+    if let Some(scan) = profile_scan.take() {
+        let _ = scan.await;
+    }
+    let raw_log = stopped?;
     let diagnostics = match tokio::time::timeout(Duration::from_secs(1), &mut err_task.0).await {
         Ok(Ok(Ok(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
         _ => "Diagnostics unavailable or pipe did not close".into(),
@@ -602,22 +656,43 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
     })
     .await
     .context("Log finalization panicked")??;
-    let mut value = result?;
+    let result = result.map(|mut value| {
+        if value["status"] == "failed" && value["error"].is_null() {
+            value["error"] = format!(
+                "agy failed: {}",
+                stderr
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .take(1000)
+                    .collect::<String>()
+            )
+            .into();
+        }
+        value
+    });
+    let final_scan = match &profile {
+        Some(profile) => profile_usage(profile, config.profile_bytes).await,
+        None => Ok(()),
+    };
+    let mut value = match (result, final_scan) {
+        (Err(primary), Err(scan)) => {
+            return Err(primary.context(format!("Final conversation check: {scan:#}")));
+        }
+        (Err(error), _) => return Err(error),
+        (Ok(value), Err(scan)) if value["status"] == "succeeded" => return Err(scan),
+        (Ok(mut value), Err(scan)) => {
+            let original = value["error"].as_str().unwrap_or_default();
+            value["error"] = format!("{original}; Final conversation check: {scan:#}")
+                .trim_start_matches("; ")
+                .into();
+            value
+        }
+        (Ok(value), Ok(())) => value,
+    };
     if value["status"] == "succeeded" && denied.load(Ordering::Relaxed) {
         value["status"] = "incomplete".into();
         value["error"] = "One or more actions were denied; inspect the report".into();
-    }
-    if value["status"] == "failed" && value["error"].is_null() {
-        value["error"] = format!(
-            "agy failed: {}",
-            stderr
-                .as_str()
-                .unwrap()
-                .chars()
-                .take(1000)
-                .collect::<String>()
-        )
-        .into();
     }
     Ok(value)
 }

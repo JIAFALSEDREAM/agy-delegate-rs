@@ -16,6 +16,7 @@ pub(crate) struct Profiles {
 }
 pub(crate) struct Profile {
     pub path: PathBuf,
+    pub directory: Arc<Dir>,
 }
 
 fn child(parent: &Dir, name: &str) -> io::Result<Dir> {
@@ -59,6 +60,7 @@ impl Profiles {
         seed(&directory, &home.home_dir().join(".gemini/antigravity-cli"))?;
         Ok(Profile {
             path: self.path.join(id),
+            directory: Arc::new(directory),
         })
     }
 }
