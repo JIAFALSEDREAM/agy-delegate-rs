@@ -264,8 +264,20 @@ impl Config {
     }
 
     pub fn sandbox(&self, cwd: &Path, tmp: &Path) -> Result<Command> {
+        self.sandbox_profile(cwd, tmp, None)
+    }
+
+    pub(crate) fn sandbox_profile(
+        &self,
+        cwd: &Path,
+        tmp: &Path,
+        managed: Option<&Path>,
+    ) -> Result<Command> {
         let home = directories::BaseDirs::new().context("Cannot find home directory")?;
-        let profile = private_dir(&home.home_dir().join(".gemini"))?;
+        let profile = match managed {
+            Some(path) => path.canonicalize()?,
+            None => private_dir(&home.home_dir().join(".gemini"))?,
+        };
         let cwd = cwd.canonicalize()?;
         ensure!(cwd.is_dir(), "cwd must be an existing directory");
         let tmp = tmp.canonicalize()?;

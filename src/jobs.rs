@@ -101,6 +101,7 @@ pub struct Jobs {
     pub config: Config,
     pub state: PathBuf,
     job_root: Arc<Dir>,
+    profiles: crate::profiles::Profiles,
 }
 pub struct Shutdown {
     jobs: Jobs,
@@ -186,6 +187,7 @@ impl Jobs {
         }
         let job_root = Arc::new(root.open_dir_nofollow("jobs")?);
         let jobs = Self {
+            profiles: crate::profiles::Profiles::new(&state)?,
             config,
             state,
             job_root,
@@ -373,7 +375,11 @@ impl Jobs {
         let dir_value = serde_json::to_value(&dir).context("State directory must be UTF-8")?;
         let config_value =
             serde_json::to_value(&self.config).context("Configured paths must be UTF-8")?;
-        let job = json!({"id":id,"root_id":root,"cwd":cwd_value,"status":"starting","created":now(),"updated":now(),"conversation":conversation,"progress":"queued","error":null,"exit_code":null,"local_log_dir":dir_value,"config":config_value,"task":task});
+        let managed_profile = match parent {
+            Some(parent) => Self::load(&tx, parent)?["managed_profile"] == true,
+            None => true,
+        };
+        let job = json!({"id":id,"root_id":root,"cwd":cwd_value,"status":"starting","created":now(),"updated":now(),"conversation":conversation,"progress":"queued","error":null,"exit_code":null,"local_log_dir":dir_value,"config":config_value,"task":task,"managed_profile":managed_profile});
         tx.execute(
             "INSERT INTO jobs VALUES (?1,?2,?3,?4,?5)",
             params![id, root, "starting", now(), serde_json::to_string(&job)?],
@@ -438,6 +444,7 @@ impl Jobs {
             config,
             state: self.state.clone(),
             job_root: self.job_root.clone(),
+            profiles: self.profiles.clone(),
         };
         original.submit(
             message,
@@ -1063,6 +1070,14 @@ impl Jobs {
         );
         let task = job["task"].as_str().context("Missing task")?.to_owned();
         let conversation = job["conversation"].as_str().map(str::to_owned);
+        let profile_root = (job["managed_profile"] == true)
+            .then(|| {
+                job["root_id"]
+                    .as_str()
+                    .context("Missing conversation root")
+                    .map(str::to_owned)
+            })
+            .transpose()?;
         job["status"] = "running".into();
         job["worker_pid"] = std::process::id().into();
         self.save(&job)?;
@@ -1094,7 +1109,10 @@ impl Jobs {
                 &cwd,
                 &task,
                 conversation.as_deref(),
-                &dir,
+                runner::RunPaths {
+                    job: &dir,
+                    profile: profile_root.as_deref().map(|root| (&self.profiles, root)),
+                },
                 &stop_runner,
                 async |event| {
                     let started = event["event"] == "sandbox_started";

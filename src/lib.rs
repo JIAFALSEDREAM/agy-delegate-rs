@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod integration;
 pub mod jobs;
 pub mod mcp;
+pub(crate) mod profiles;
 pub mod redaction;
 pub mod runner;
 pub(crate) mod tree;

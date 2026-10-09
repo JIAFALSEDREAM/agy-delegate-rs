@@ -334,11 +334,19 @@ pub async fn run(
         cwd,
         task,
         conversation,
-        dir,
+        RunPaths {
+            job: dir,
+            profile: None,
+        },
         &AtomicBool::new(false),
         progress,
     )
     .await
+}
+
+pub(crate) struct RunPaths<'a> {
+    pub job: &'a Path,
+    pub profile: Option<(&'a crate::profiles::Profiles, &'a str)>,
 }
 
 pub(crate) async fn run_with_stop(
@@ -346,10 +354,11 @@ pub(crate) async fn run_with_stop(
     cwd: &Path,
     task: &str,
     conversation: Option<&str>,
-    dir: &Path,
+    paths: RunPaths<'_>,
     stop: &AtomicBool,
     mut progress: impl AsyncFnMut(Value) -> Result<()>,
 ) -> Result<Value> {
+    let dir = paths.job;
     config.validate()?;
     if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
         return Ok(json!({"status":"cancelled"}));
@@ -358,7 +367,22 @@ pub(crate) async fn run_with_stop(
     let tmp = private_dir(&dir.join("tmp"))?;
     let log_root = Arc::new(Dir::open_ambient_dir(&tmp, cap_std::ambient_authority())?);
     let raw_log = RawLog(log_root.clone(), true);
-    let mut cmd = config.sandbox(&cwd, &tmp)?;
+    let profile = if let Some((profiles, id)) = paths.profile {
+        let profiles = profiles.clone();
+        let id = id.to_owned();
+        // Always join preparation before returning, retaining the worker's ownership lease.
+        Some(tokio::task::spawn_blocking(move || profiles.prepare(&id)).await??)
+    } else {
+        None
+    };
+    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
+        return Ok(json!({"status":"cancelled"}));
+    }
+    let mut cmd = config.sandbox_profile(
+        &cwd,
+        &tmp,
+        profile.as_ref().map(|profile| profile.path.as_path()),
+    )?;
     let environment = cmd
         .as_std()
         .get_envs()
@@ -380,6 +404,9 @@ pub(crate) async fn run_with_stop(
         .arg(tmp.join("agy.log"));
     if let Some(model) = &config.model {
         cmd.args(["--model", model]);
+    }
+    if let Some(profile) = &profile {
+        cmd.arg("--gemini_dir").arg(&profile.path);
     }
     if let Some(id) = conversation {
         cmd.args(["--conversation", id]);
