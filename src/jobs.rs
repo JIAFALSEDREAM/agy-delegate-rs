@@ -782,6 +782,7 @@ impl Jobs {
         let mut preview_purged = std::collections::BTreeSet::new();
         let (mut selected, mut deleted, mut skipped, mut errors) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut deleted_conversations = Vec::new();
         for (id, root, status, updated) in &rows {
             if (!terminal(status) && status != "purging") || protected.contains(root.as_str()) {
                 continue;
@@ -986,6 +987,12 @@ impl Jobs {
                 skipped.push(json!({"id":id,"reason":"changed_or_active_conversation"}));
                 continue;
             }
+            let remove_profile = current["managed_profile"] == true
+                && !tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM jobs WHERE root=?1 AND id!=?2)",
+                    params![root, id],
+                    |row| row.get::<_, bool>(0),
+                )?;
             if status != "purging" {
                 tx.execute("UPDATE jobs SET status='purging',data=json_set(data,'$.status','purging','$.cleanup_previous_status',?1) WHERE id=?2", params![status,id])?;
             }
@@ -998,12 +1005,20 @@ impl Jobs {
                 errors.push(json!({"id":id,"operation":"remove_logs","detail":error.to_string(),"record_retained":true}));
                 continue;
             }
+            if remove_profile {
+                if let Err(error) = self.profiles.remove(root) {
+                    // Partial profile deletion cannot be resumed. Keep purging until a retry finishes.
+                    errors.push(json!({"id":id,"operation":"remove_profile","detail":error.to_string(),"record_retained":true}));
+                    continue;
+                }
+                deleted_conversations.push(root.clone());
+            }
             if db.execute("DELETE FROM jobs WHERE id=?1 AND status='purging'", [id])? == 1 {
                 deleted.push(id.clone());
             }
         }
         Ok(
-            json!({"ok":errors.is_empty(),"dry_run":dry_run,"selected_ids":selected,"deleted_ids":deleted,"skipped":skipped,"errors":errors}),
+            json!({"ok":errors.is_empty(),"dry_run":dry_run,"selected_ids":selected,"deleted_ids":deleted,"deleted_conversation_ids":deleted_conversations,"skipped":skipped,"errors":errors}),
         )
     }
     pub fn report(&self, id: &str) -> Result<String> {

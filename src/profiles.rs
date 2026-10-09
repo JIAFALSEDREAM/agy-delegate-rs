@@ -43,11 +43,7 @@ impl Profiles {
         })
     }
 
-    pub fn prepare(&self, id: &str) -> Result<Profile> {
-        ensure!(
-            uuid::Uuid::parse_str(id)?.to_string() == id,
-            "Invalid conversation root"
-        );
+    fn verify_root(&self) -> Result<()> {
         let current = Dir::open_ambient_dir(&self.path, cap_std::ambient_authority())?;
         let expected = self.root.dir_metadata()?;
         let actual = current.dir_metadata()?;
@@ -55,6 +51,30 @@ impl Profiles {
             actual.dev() == expected.dev() && actual.ino() == expected.ino(),
             "Conversation storage root changed"
         );
+        Ok(())
+    }
+
+    pub fn remove(&self, id: &str) -> Result<()> {
+        ensure!(
+            uuid::Uuid::parse_str(id)?.to_string() == id,
+            "Invalid conversation root"
+        );
+        self.verify_root()?;
+        match self.root.symlink_metadata(id) {
+            Ok(metadata) => ensure!(metadata.is_dir(), "Unsafe conversation directory"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        crate::tree::remove(self.root.open_dir_nofollow(id)?)?;
+        Ok(())
+    }
+
+    pub fn prepare(&self, id: &str) -> Result<Profile> {
+        ensure!(
+            uuid::Uuid::parse_str(id)?.to_string() == id,
+            "Invalid conversation root"
+        );
+        self.verify_root()?;
         let directory = child(&self.root, id)?;
         let home = directories::BaseDirs::new().context("Cannot find home directory")?;
         seed(&directory, &home.home_dir().join(".gemini/antigravity-cli"))?;
