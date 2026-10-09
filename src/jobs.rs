@@ -698,33 +698,7 @@ impl Jobs {
         self.cleanup_using(dry_run, |child, _| child.map_or(Ok(()), Self::remove_logs))
     }
     fn remove_logs(child: Dir) -> std::io::Result<()> {
-        // Reopen from the verified root, with no-follow at every component.
-        // Keep descriptor and call-stack use constant, even for deeply nested tmp trees.
-        let mut pending = vec![(PathBuf::new(), false)];
-        while let Some((path, visited)) = pending.pop() {
-            if visited && path.as_os_str().is_empty() {
-                continue;
-            }
-            let mut dir = child.try_clone()?;
-            for component in path.components() {
-                dir = dir.open_dir_nofollow(component)?;
-            }
-            if visited {
-                dir.remove_open_dir()?;
-            } else {
-                pending.push((path.clone(), true));
-                for entry in dir.entries()? {
-                    let entry = entry?;
-                    if entry.file_type()?.is_dir() {
-                        pending.push((path.join(entry.file_name()), false));
-                    } else {
-                        dir.remove_file(entry.file_name())?;
-                    }
-                }
-            }
-        }
-        // Final removal is nonrecursive: a concurrent substitution cannot lose contents.
-        child.remove_open_dir()
+        crate::tree::remove(child)
     }
     fn cleanup_using(
         &self,
