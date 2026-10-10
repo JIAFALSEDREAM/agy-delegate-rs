@@ -115,6 +115,32 @@ impl Drop for FileLease {
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
+fn open_task_lock(directory: &Dir, name: &str) -> std::io::Result<fs::File> {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    // Native macOS can report NotFound during concurrent first creation.
+    // Each retry keeps the same pinned directory and refuses symlinks.
+    let mut retries = 0;
+    loop {
+        match directory.open_with(name, &options) {
+            Ok(file) => return Ok(file.into_std()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && retries < 3 => {
+                retries += 1;
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 impl Shutdown {
     pub async fn stop_all(&self) -> Result<()> {
         self.jobs.stop_all_locked(self.lease.clone()).await
@@ -146,18 +172,8 @@ struct RunCancel {
 }
 impl RunCancel {
     fn protect_failed_start(&mut self) -> Result<()> {
-        let mut options = cap_std::fs::OpenOptions::new();
-        options
-            .read(true)
-            .write(true)
-            .create(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NONBLOCK);
-        }
-        let file = self.dir.open_with("owner.lock", &options)?.into_std();
+        let file = open_task_lock(&self.dir, "owner.lock")
+            .context("Cannot open task owner lock after failed startup")?;
         ensure!(
             file.metadata()?.is_file(),
             "Task owner must be a regular file"
@@ -193,9 +209,13 @@ impl Jobs {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
-        let job_root = Arc::new(root.open_dir_nofollow("jobs")?);
+        let job_root = Arc::new(
+            root.open_dir_nofollow("jobs")
+                .context("Cannot open task storage directory")?,
+        );
         let jobs = Self {
-            profiles: crate::profiles::Profiles::new(&state)?,
+            profiles: crate::profiles::Profiles::new(&state)
+                .context("Cannot initialize conversation storage")?,
             config,
             state,
             job_root,
@@ -558,18 +578,8 @@ impl Jobs {
     }
     fn state_lease(&self) -> Result<fs::File> {
         let root = Dir::open_ambient_dir(&self.state, cap_std::ambient_authority())?;
-        let mut options = cap_std::fs::OpenOptions::new();
-        options
-            .read(true)
-            .write(true)
-            .create(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NONBLOCK);
-        }
-        let lease = root.open_with(".shutdown.lock", &options)?.into_std();
+        let lease =
+            open_task_lock(&root, ".shutdown.lock").context("Cannot open task shutdown lock")?;
         ensure!(
             lease.metadata()?.is_file(),
             "Shutdown lock must be a regular file"
@@ -600,13 +610,8 @@ impl Jobs {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let _ownership = lease;
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            let mut options = cap_std::fs::OpenOptions::new();
-            options.read(true).write(true).create(true).follow(FollowSymlinks::No);
-            #[cfg(unix)] {
-                use cap_std::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NONBLOCK);
-            }
-            let cleanup = jobs.job_root.open_with(".cleanup.lock", &options)?.into_std();
+            let cleanup = open_task_lock(&jobs.job_root, ".cleanup.lock")
+                .context("Cannot open retention cleanup lock during shutdown")?;
             ensure!(cleanup.metadata()?.is_file(), "Cleanup lock must be a regular file");
             loop {
                 match fs2::FileExt::try_lock_shared(&cleanup) {
@@ -664,18 +669,8 @@ impl Jobs {
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => { pending.remove(&id); continue; },
                         Err(error) => return Err(error.into()),
                     };
-                    let mut options = cap_std::fs::OpenOptions::new();
-                    options
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .follow(FollowSymlinks::No);
-                    #[cfg(unix)]
-                    {
-                        use cap_std::fs::OpenOptionsExt;
-                        options.custom_flags(libc::O_NONBLOCK);
-                    }
-                    let lease = child.open_with("owner.lock", &options)?.into_std();
+                    let lease = open_task_lock(&child, "owner.lock")
+                        .context("Cannot open stopped task owner lock")?;
                     ensure!(
                         lease.metadata()?.is_file(),
                         "Task owner must be a regular file"
@@ -727,37 +722,14 @@ impl Jobs {
         let _cleanup_lease = if dry_run {
             None
         } else {
-            let mut options = cap_std::fs::OpenOptions::new();
-            options
-                .read(true)
-                .write(true)
-                .create(true)
-                .follow(FollowSymlinks::No);
-            #[cfg(unix)]
-            {
-                use cap_std::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NONBLOCK);
-            }
-            // Native macOS can report NotFound during concurrent first creation.
-            // Each retry keeps the same pinned root and refuses symlinks.
-            let mut retries = 0;
-            let file = loop {
-                match self.job_root.open_with(".cleanup.lock", &options) {
-                    Ok(file) => break file,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound && retries < 3 => {
-                        retries += 1;
-                        std::thread::yield_now();
-                    }
-                    Err(error) => return Err(error).context("Cannot open retention cleanup lock"),
-                }
-            };
+            let file = open_task_lock(&self.job_root, ".cleanup.lock")
+                .context("Cannot open retention cleanup lock")?;
             ensure!(
                 file.metadata()
                     .context("Cannot inspect retention cleanup lock")?
                     .is_file(),
                 "Unsafe cleanup lock"
             );
-            let file = file.into_std();
             match file.try_lock_exclusive() {
                 Ok(()) => Some(FileLease(file)),
                 Err(error)

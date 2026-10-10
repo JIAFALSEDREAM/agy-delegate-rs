@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_BACKTRACE: '1'
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -111,6 +114,11 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --all-targets --target "$TARGET" -- -D warnings
           cargo test --locked --target "$TARGET"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            for attempt in {1..5}; do
+              cargo test --locked --target "$TARGET" --test runtime concurrent_synchronous_results_survive_automatic_retention
+            done
+          fi
           cargo test --locked --target "$TARGET" --test sandbox native_sandbox_preserves_fixture -- --ignored
           cargo test --locked --target "$TARGET" --test maintenance native_doctor_checks_the_sandbox_without_a_model_call -- --ignored
       - name: Build and smoke test native binary
