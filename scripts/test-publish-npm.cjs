@@ -23,7 +23,8 @@ const scenario=JSON.parse(fs.readFileSync(path.join(root,"scenario.json")));
 if(args[0]==="view"){const result=scenario.queries[Math.min(index,scenario.queries.length-1)];console.log(JSON.stringify(result.value));process.exit(result.status)}
 if(args[0]==="publish")process.exit(scenario.publishStatus);process.exit(99);
 `, { mode: 0o755 });
-    const result = spawnSync(process.execPath, [path.join(__dirname, "publish-npm.mjs"), path.join(directory, "package.tgz"), "0.1.0", name], {
+    const result = spawnSync(process.execPath, [path.join(__dirname, "publish-npm.mjs"), "package.tgz", "0.1.0", name], {
+      cwd: directory,
       env: { ...process.env, FIXTURE: directory, PATH: `${directory}${path.delimiter}${process.env.PATH}` }, encoding: "utf8", timeout: 15000,
     });
     if (result.error) throw result.error;
@@ -53,6 +54,7 @@ test("different artifacts and registry outages prevent publication", () => {
 test("only a missing version is published with public access and provenance", () => {
   const result = scenario([missing]);
   assert.equal(result.status, 0);
+  assert.ok(path.isAbsolute(result.calls[1][1]), "npm must receive an absolute local archive path");
   assert.deepEqual(result.calls[1].slice(2), ["--access", "public", "--provenance"]);
 });
 test("an accepted upload followed by a client failure is reconciled", () => {

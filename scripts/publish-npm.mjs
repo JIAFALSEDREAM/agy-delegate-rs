@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const [archive, version, name = "agy-delegate-rs"] = process.argv.slice(2);
@@ -8,6 +9,9 @@ if (!archive || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? ""
   throw new Error("usage: node scripts/publish-npm.mjs ARCHIVE VERSION [PACKAGE_NAME]");
 }
 const integrity = `sha512-${crypto.createHash("sha512").update(fs.readFileSync(archive)).digest("base64")}`;
+// npm interprets an unprefixed relative path such as dist/package.tgz as
+// a GitHub shorthand instead of a local archive. Always pass an absolute path.
+const archivePath = path.resolve(archive);
 const spec = `${name}@${version}`;
 const query = spawnSync("npm", ["view", spec, "dist.integrity", "--json"], { encoding: "utf8" });
 if (query.error) throw query.error;
@@ -19,7 +23,7 @@ if (query.status === 0) {
   console.log(`Verified existing publication: ${spec}`);
 } else {
   if (metadata?.error?.code !== "E404") throw new Error(`Registry query failed: ${query.stderr || query.stdout}`);
-  const publish = spawnSync("npm", ["publish", archive, "--access", "public", "--provenance"], { stdio: "inherit" });
+  const publish = spawnSync("npm", ["publish", archivePath, "--access", "public", "--provenance"], { stdio: "inherit" });
   if (publish.error) throw publish.error;
   if (publish.status !== 0) {
     let confirmed = false;
