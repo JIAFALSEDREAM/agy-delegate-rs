@@ -46,7 +46,7 @@ fn private_profiles_reuse_history_and_preserve_shared_login() {
             .args(["--task", "first"])
             .bounded_output(),
     );
-    assert_eq!(first["status"], "succeeded");
+    assert_eq!(first["status"], "succeeded", "{first}");
     let id = first["id"].as_str().unwrap();
     let profile = state.path().join("conversations").join(id);
     assert_eq!(
@@ -64,7 +64,7 @@ fn private_profiles_reuse_history_and_preserve_shared_login() {
             .args(["wait", followup["id"].as_str().unwrap(), "--seconds", "5"])
             .bounded_output(),
     );
-    assert_eq!(second["status"], "succeeded");
+    assert_eq!(second["status"], "succeeded", "{second}");
     assert_eq!(second["root_id"], id);
     assert_eq!(
         fs::read(shared.join("antigravity-oauth-token")).unwrap(),

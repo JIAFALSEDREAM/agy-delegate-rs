@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Output, Stdio},
@@ -78,9 +78,10 @@ pub fn wait(mut captured: Captured) -> Output {
 }
 pub fn backend(state: &Path) -> std::path::PathBuf {
     let path = state.join("codex");
-    fs::write(
-        &path,
-        r#"#!/bin/sh
+    let mut fixture = tempfile::NamedTempFile::new_in(state).unwrap();
+    fixture
+        .write_all(
+            r#"#!/bin/sh
 if [ "$1" = --version ]; then
     echo 'codex-cli 0.160.0'
     exit 0
@@ -95,10 +96,21 @@ done
 [ "$#" -gt 0 ] || exit 99
 shift
 exec "$@"
-"#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+"#
+            .as_bytes(),
+        )
+        .unwrap();
+    fixture
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .unwrap();
+    // A wait/followup command must never truncate a script a worker may execute.
+    // Publish a complete fixture once, including for concurrent constructors.
+    match fixture.into_temp_path().persist_noclobber(&path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("Cannot publish backend fixture: {error}"),
+    }
     path
 }
 pub fn invoke(state: &Path, repo: &Path, script: &Path, task: &str) -> Output {
