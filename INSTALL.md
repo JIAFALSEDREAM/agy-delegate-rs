@@ -4,7 +4,7 @@
 
 - 从源码安装需要 Rust 1.88 或更新版本，以及本平台的 C 编译工具链（Linux 常用 GCC/Clang，macOS 使用 Xcode Command Line Tools，Windows 按所选 Rust 工具链安装相应构建工具）；本项目编译 SQLite。npm 和 GitHub Release 预编译包无需这些构建工具。
 - 已安装能提供 `agy` 命令、stream-json 接口和 `--gemini_dir` 数据目录参数的 Antigravity CLI，且用户已有的登录或 API 配置能正常调用模型；本项目不安装或代管 agy。
-- 支持命名权限配置的 Codex CLI。本机验证版本为 0.160.0；Linux 还需要 bubblewrap 和允许创建用户命名空间的环境。
+- 支持命名权限配置且沙箱可正常运行的 Codex CLI，本机验证版本为 0.160.0。本工具直接调用 `codex sandbox`，不单独调用或检查系统中的 bubblewrap；具体运行条件由 Codex 的沙箱后端决定，`install` / `doctor` 会实际验证读写边界。
 
 安装 Codex CLI 可使用 Node.js/npm：
 
@@ -12,13 +12,7 @@
 npm install -g @openai/codex@0.160.0
 ```
 
-Linux 的 Debian/Ubuntu 系统可安装 bubblewrap：
-
-```sh
-sudo apt-get install bubblewrap
-```
-
-macOS 由 Codex 使用系统 Seatbelt；Windows 使用 Codex 的 unelevated 后端。Linux、macOS、Windows 的 x86_64 与 ARM64 共六种原生 CI 环境均已通过测试，并验证项目读取、写入被拒及临时目录可写。
+Linux 的沙箱运行条件（如用户命名空间权限）需满足当前 Codex 后端要求；macOS 由 Codex 使用系统 Seatbelt，Windows 使用 Codex 的 unelevated 后端。Linux、macOS、Windows 的 x86_64 与 ARM64 共六种原生 CI 环境均已通过测试，并验证项目读取、写入被拒及临时目录可写。
 
 当前模型验收使用用户已有的 API/转换服务，原生 OAuth 登录、系统钥匙串访问和令牌刷新尚未实测。三端都依赖本机 Codex CLI，本项目通过它运行操作系统沙箱。
 
@@ -30,7 +24,7 @@ macOS 由 Codex 使用系统 Seatbelt；Windows 使用 Codex 的 unelevated 后�
 - npm：`npm install -g agy-delegate-rs`，需要 Node.js 22.14+，不需要 Rust；入口包通过可选依赖自动安装匹配系统与架构的平台包，只下载一个二进制，不使用安装脚本。不要禁用 optional dependencies；若缺少平台包，使用 `npm install -g agy-delegate-rs --include=optional` 重装。
 - crates.io：`cargo install agy-delegate-rs --locked`，需要前述 Rust 和 C 编译工具链。
 
-预编译包提供 Linux x64/arm64（musl 静态链接）、macOS x64/arm64、Windows x64/arm64，共六种组合。三种方式都不会安装 agy、Codex CLI 或 bubblewrap；首次集成执行 `agy-delegate-rs install`，成功后新开 Codex 会话。模型认证仍需真实调查验证。
+预编译包提供 Linux x64/arm64（musl 静态链接）、macOS x64/arm64、Windows x64/arm64，共六种组合。三种方式都不会安装 agy 或 Codex CLI；首次集成执行 `agy-delegate-rs install`，成功后新开 Codex 会话。模型认证仍需真实调查验证。
 
 从内置所有二进制的旧 npm 版（0.1.3 及更早）升级到按平台拆包版本时，原生程序路径会变化。**已经执行过 `install` 或 `register` 的用户，应在 npm 升级前先用旧版执行 `uninstall`，升级后再执行 `install`**，并沿用注册时的配置参数：
 
