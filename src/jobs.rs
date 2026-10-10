@@ -105,7 +105,15 @@ pub struct Jobs {
 }
 pub struct Shutdown {
     jobs: Jobs,
-    lease: Arc<fs::File>,
+    lease: Arc<FileLease>,
+}
+// fork() can keep a duplicate descriptor alive until exec, even with CLOEXEC.
+// Release the lock explicitly when its last owner drops, before closing the file.
+struct FileLease(fs::File);
+impl Drop for FileLease {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
 }
 impl Shutdown {
     pub async fn stop_all(&self) -> Result<()> {
@@ -133,8 +141,8 @@ fn mark_cancel(dir: &Dir) -> Result<()> {
 struct RunCancel {
     dir: Dir,
     armed: bool,
-    _result: Option<fs::File>,
-    _startup: Option<fs::File>,
+    _result: Option<FileLease>,
+    _startup: Option<FileLease>,
 }
 impl RunCancel {
     fn protect_failed_start(&mut self) -> Result<()> {
@@ -155,7 +163,7 @@ impl RunCancel {
             "Task owner must be a regular file"
         );
         file.try_lock_exclusive()?;
-        self._startup = Some(file);
+        self._startup = Some(FileLease(file));
         Ok(())
     }
 }
@@ -397,7 +405,7 @@ impl Jobs {
                 .follow(FollowSymlinks::No);
             let lease = job_dir.open_with("result.lock", &options)?.into_std();
             lease.try_lock_exclusive()?;
-            Some(lease)
+            Some(FileLease(lease))
         };
         let mut submission_cancel = RunCancel {
             dir: job_dir,
@@ -568,11 +576,11 @@ impl Jobs {
         );
         Ok(lease)
     }
-    fn submission_lease(&self) -> Result<fs::File> {
+    fn submission_lease(&self) -> Result<FileLease> {
         let lease = self.state_lease()?;
         fs2::FileExt::try_lock_shared(&lease)
             .context("Task state is shutting down; retry later")?;
-        Ok(lease)
+        Ok(FileLease(lease))
     }
     pub fn shutdown(&self) -> Result<Shutdown> {
         let lease = self.state_lease()?;
@@ -581,13 +589,13 @@ impl Jobs {
             .context("Task submission or startup is active; retry shutdown")?;
         Ok(Shutdown {
             jobs: self.clone(),
-            lease: Arc::new(lease),
+            lease: Arc::new(FileLease(lease)),
         })
     }
     pub async fn stop_all(&self) -> Result<()> {
         self.shutdown()?.stop_all().await
     }
-    async fn stop_all_locked(&self, lease: Arc<fs::File>) -> Result<()> {
+    async fn stop_all_locked(&self, lease: Arc<FileLease>) -> Result<()> {
         let jobs = self.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let _ownership = lease;
@@ -742,7 +750,7 @@ impl Jobs {
             );
             let file = file.into_std();
             match file.try_lock_exclusive() {
-                Ok(()) => Some(file),
+                Ok(()) => Some(FileLease(file)),
                 Err(error)
                     if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
                 {
@@ -1306,6 +1314,33 @@ impl Jobs {
 mod cleanup_concurrency {
     use super::*;
     #[test]
+    fn lease_releases_the_lock_while_an_inherited_descriptor_remains_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lease");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.try_lock_exclusive().unwrap();
+        // A duplicate models the descriptor temporarily inherited by fork().
+        let inherited = file.try_clone().unwrap();
+        let lease = Arc::new(FileLease(file));
+        let owner = lease.clone();
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        drop(lease);
+        assert!(contender.try_lock_exclusive().is_err());
+        drop(owner);
+        contender.try_lock_exclusive().unwrap();
+        fs2::FileExt::unlock(&contender).unwrap();
+        drop(inherited);
+    }
+    #[test]
     fn failed_start_result_is_retained_until_its_reader_releases_ownership() {
         let state = tempfile::tempdir().unwrap();
         let jobs = Jobs::new(Config {
@@ -1337,7 +1372,8 @@ mod cleanup_concurrency {
             .unwrap();
         assert_eq!(jobs.get(&id).unwrap()["status"], "failed");
         drop(guard);
-        assert_eq!(jobs.cleanup(false).unwrap()["deleted_ids"], json!([id]));
+        let cleanup = jobs.cleanup(false).unwrap();
+        assert_eq!(cleanup["deleted_ids"], json!([id]), "{cleanup}");
     }
     #[test]
     fn cancellation_guard_uses_pinned_directory_and_never_truncates_existing_markers() {
