@@ -1,0 +1,19 @@
+{
+  "name": "agy-delegate-rs",
+  "version": "0.1.0",
+  "description": "Read-only agy investigations through the Codex OS sandbox",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JIAFALSEDREAM/agy-delegate-rs.git"
+  },
+  "bin": {
+    "agy-delegate-rs": "bin/agy-delegate-rs.cjs"
+  },
+  "files": ["bin", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "os": ["linux", "darwin", "win32"],
+  "cpu": ["x64", "arm64"]
+}
