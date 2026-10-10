@@ -98,6 +98,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           echo 'CC=musl-gcc' >> "$GITHUB_ENV"
           linker="CARGO_TARGET_${TARGET^^}_LINKER"
           echo "${linker//-/_}=musl-gcc" >> "$GITHUB_ENV"

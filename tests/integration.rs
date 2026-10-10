@@ -407,7 +407,8 @@ fn failed_install_doctor_does_not_register_or_write_rules() {
     assert!(
         homes
             .lines()
-            .all(|home| std::path::Path::new(home) == fixture.home.path())
+            .all(|home| std::path::Path::new(home).canonicalize().unwrap()
+                == fixture.home.path().canonicalize().unwrap())
     );
     for name in [
         "config.toml",
