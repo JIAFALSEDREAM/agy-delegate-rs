@@ -32,6 +32,16 @@ macOS 由 Codex 使用系统 Seatbelt；Windows 使用 Codex 的 unelevated 后�
 
 预编译包提供 Linux x64/arm64（musl 静态链接）、macOS x64/arm64、Windows x64/arm64，共六种组合。三种方式都不会安装 agy、Codex CLI 或 bubblewrap；首次集成执行 `agy-delegate-rs install`，成功后新开 Codex 会话。模型认证仍需真实调查验证。
 
+从内置所有二进制的旧 npm 版（0.1.3 及更早）升级到按平台拆包版本时，原生程序路径会变化。**已经执行过 `install` 或 `register` 的用户，应在 npm 升级前先用旧版执行 `uninstall`，升级后再执行 `install`**，并沿用注册时的配置参数：
+
+```sh
+agy-delegate-rs uninstall
+npm install -g agy-delegate-rs@latest
+agy-delegate-rs install
+```
+
+如果已经升级且提示存在不属于当前程序的 MCP 注册，请在原 npm 安装前缀中暂时安装 `agy-delegate-rs@0.1.3`，恢复旧路径后按上述顺序迁移。无需删除配置或任务历史；`uninstall` 会先关闭该状态目录中的任务。未注册过 MCP 的用户可以直接安装新版，后续平台包升级保持相同路径。
+
 在仓库目录执行：
 
 ```sh
