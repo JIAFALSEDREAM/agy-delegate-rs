@@ -33,6 +33,15 @@ def repository_url(repository):
     return f"https://github.com/{repository}"
 
 
+def platform_dependencies(version):
+    return {f"agy-delegate-rs-{platform}": version for platform in TARGETS.values()}
+
+
+def validate_dependencies(manifest):
+    if manifest.get("optionalDependencies") != platform_dependencies(manifest["version"]):
+        raise ValueError("npm platform dependencies must cover the complete matrix at the entry package version")
+
+
 def validate(tag, main_ref, repository):
     if not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag):
         raise ValueError("release tags must be stable versions: vMAJOR.MINOR.PATCH")
@@ -41,6 +50,7 @@ def validate(tag, main_ref, repository):
     npm = json.loads((ROOT / "npm/package.json").read_text())
     if cargo["version"] != version or npm["version"] != version:
         raise ValueError("tag, Cargo.toml and npm/package.json versions must match")
+    validate_dependencies(npm)
     commit = command("git", "rev-parse", f"refs/tags/{tag}^{{commit}}")
     if commit != command("git", "rev-parse", "HEAD"):
         raise ValueError("checkout must point to the tagged commit")
@@ -74,6 +84,7 @@ def archive(target, version, output):
 
 def assemble(artifacts, output, repository):
     manifest = json.loads((ROOT / "npm/package.json").read_text())
+    validate_dependencies(manifest)
     manifest["repository"] = {"type": "git", "url": f"git+{repository_url(repository)}.git"}
     version = manifest["version"]
     # Validate the complete matrix before creating anything intended for publication.
@@ -95,13 +106,29 @@ def assemble(artifacts, output, repository):
     assets = output / "assets"
     assets.mkdir()
     for platform, binary, bundle in inputs:
-        destination = package / "bin" / platform / binary.name
+        name = f"agy-delegate-rs-{platform}"
+        native = output / "npm-platforms" / name
+        destination = native / "bin" / binary.name
         destination.parent.mkdir(parents=True)
         shutil.copy2(binary, destination)
         if not platform.startswith("win32"):
             destination.chmod(0o755)
+        system, cpu = platform.split("-")
+        metadata = {
+            "name": name, "version": version,
+            "description": f"Native {platform} binary for agy-delegate-rs",
+            "license": manifest.get("license", "MIT"), "repository": manifest["repository"],
+            "os": [system], "cpu": [cpu], "files": ["bin", "LICENSE", "README.md"],
+        }
+        (native / "package.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        shutil.copy2(ROOT / "LICENSE", native / "LICENSE")
+        (native / "README.md").write_text(
+            f"# {name}\n\nNative binary installed automatically by `agy-delegate-rs`.\n"
+            "Install the CLI with `npm install -g agy-delegate-rs`.\n", encoding="utf-8"
+        )
+        command("npm", "pack", "--silent", "--ignore-scripts", "--pack-destination", str(assets.resolve()), cwd=native)
         shutil.copy2(bundle, assets / bundle.name)
-    command("npm", "pack", "--ignore-scripts", "--pack-destination", str(assets.resolve()), cwd=package)
+    command("npm", "pack", "--silent", "--ignore-scripts", "--pack-destination", str(assets.resolve()), cwd=package)
     checksums = []
     for asset in sorted(assets.iterdir()):
         checksums.append(f"{hashlib.sha256(asset.read_bytes()).hexdigest()}  {asset.name}\n")
@@ -123,9 +150,9 @@ def reuse_assets(published, output):
         checked.add(name)
     if checked != expected - {"SHA256SUMS"}:
         raise ValueError("published checksum manifest is incomplete")
-    npm = next(item for item in output.iterdir() if item.suffix == ".tgz")
-    if npm.read_bytes() != (published / npm.name).read_bytes():
-        raise ValueError("published npm payload differs from this build; release assets are immutable")
+    for npm in output.glob("*.tgz"):
+        if npm.read_bytes() != (published / npm.name).read_bytes():
+            raise ValueError(f"published npm payload differs from this build: {npm.name}; release assets are immutable")
     for item in published.iterdir():
         shutil.copy2(item, output / item.name)
 

@@ -2,12 +2,13 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-const [archive, version] = process.argv.slice(2);
-if (!archive || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "")) {
-  throw new Error("usage: node scripts/publish-npm.mjs ARCHIVE VERSION");
+const [archive, version, name = "agy-delegate-rs"] = process.argv.slice(2);
+if (!archive || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "") ||
+    !/^agy-delegate-rs(?:-(?:linux|darwin|win32)-(?:x64|arm64))?$/.test(name)) {
+  throw new Error("usage: node scripts/publish-npm.mjs ARCHIVE VERSION [PACKAGE_NAME]");
 }
 const integrity = `sha512-${crypto.createHash("sha512").update(fs.readFileSync(archive)).digest("base64")}`;
-const spec = `agy-delegate-rs@${version}`;
+const spec = `${name}@${version}`;
 const query = spawnSync("npm", ["view", spec, "dist.integrity", "--json"], { encoding: "utf8" });
 if (query.error) throw query.error;
 let metadata;

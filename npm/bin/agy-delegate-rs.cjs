@@ -11,9 +11,14 @@ if (!supported.includes(platform)) {
   console.error(`agy-delegate-rs: unsupported platform ${platform}; install from source with Cargo.`);
   process.exit(1);
 }
-const binary = path.join(__dirname, platform, `agy-delegate-rs${process.platform === "win32" ? ".exe" : ""}`);
-if (!fs.existsSync(binary)) {
-  console.error("agy-delegate-rs: native binary missing; reinstall the published npm package.");
+const packageName = `agy-delegate-rs-${platform}`;
+let binary;
+try {
+  const manifest = require.resolve(`${packageName}/package.json`);
+  binary = path.join(path.dirname(manifest), "bin", `agy-delegate-rs${process.platform === "win32" ? ".exe" : ""}`);
+  if (!fs.existsSync(binary)) throw new Error("native binary missing");
+} catch {
+  console.error(`agy-delegate-rs: ${packageName} missing; reinstall agy-delegate-rs with optional dependencies enabled (npm install -g agy-delegate-rs --include=optional).`);
   process.exit(1);
 }
 const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });

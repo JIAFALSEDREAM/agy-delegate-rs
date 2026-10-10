@@ -4,7 +4,7 @@
 
 安装、配置、MCP 注册、环境诊断与历史清理见 [安装指南](INSTALL.md)。
 
-支持 GitHub Release 预编译包、`npm install -g agy-delegate-rs` 和 `cargo install agy-delegate-rs --locked`。GitHub Release 和 npm 包覆盖 Linux、macOS、Windows 的 x86_64 与 ARM64，共六种组合；npm 包内附所有二进制，无需 Rust 或安装时下载。仍需自行安装 agy、Codex CLI 和对应沙箱依赖。依赖就绪后，可用 npm 安装并注册到 Codex：
+支持 GitHub Release 预编译包、`npm install -g agy-delegate-rs` 和 `cargo install agy-delegate-rs --locked`。GitHub Release 和 npm 包覆盖 Linux、macOS、Windows 的 x86_64 与 ARM64，共六种组合；npm 入口包自动安装当前系统与架构的平台包，只下载对应二进制，无需 Rust。仍需自行安装 agy、Codex CLI 和对应沙箱依赖。依赖就绪后，可用 npm 安装并注册到 Codex：
 
 ```sh
 npm install -g agy-delegate-rs

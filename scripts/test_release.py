@@ -31,6 +31,7 @@ class ReleaseTests(unittest.TestCase):
             "repository": {"url": "git+https://github.com/example/agy-delegate-rs.git"},
             "bin": {"agy-delegate-rs": "bin/agy-delegate-rs.cjs"},
             "files": ["bin", "README.md", "LICENSE"],
+            "optionalDependencies": release.platform_dependencies("0.1.0"),
         }
         (self.root / "npm/package.json").write_text(json.dumps(self.manifest))
         (self.root / "npm/bin/agy-delegate-rs.cjs").write_text("#!/usr/bin/env node\n")
@@ -84,6 +85,17 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.validate()
 
+    def test_missing_or_mismatched_platform_dependency_is_rejected(self):
+        self.git("tag", "v0.1.0")
+        self.manifest["optionalDependencies"]["agy-delegate-rs-linux-arm64"] = "0.0.9"
+        (self.root / "npm/package.json").write_text(json.dumps(self.manifest))
+        with self.assertRaisesRegex(ValueError, "platform dependencies"):
+            self.validate()
+        self.manifest["optionalDependencies"].pop("agy-delegate-rs-linux-arm64")
+        (self.root / "npm/package.json").write_text(json.dumps(self.manifest))
+        with self.assertRaisesRegex(ValueError, "platform dependencies"):
+            release.assemble(self.make_artifacts(), self.root / "dist", "example/agy-delegate-rs")
+
     def make_artifacts(self):
         artifacts = self.root / "artifacts"
         for target, platform in release.TARGETS.items():
@@ -110,19 +122,56 @@ class ReleaseTests(unittest.TestCase):
         assets = output / "assets"
         with tarfile.open(assets / "agy-delegate-rs-0.1.0.tgz") as bundle:
             members = {item.name: item for item in bundle.getmembers()}
-            for platform in release.TARGETS.values():
+            self.assertEqual(set(members), {
+                "package/package.json", "package/bin/agy-delegate-rs.cjs", "package/README.md", "package/LICENSE",
+            })
+            manifest = json.load(bundle.extractfile("package/package.json"))
+            self.assertEqual(manifest["repository"]["url"], "git+https://github.com/example/agy-delegate-rs.git")
+            self.assertEqual(manifest["optionalDependencies"], release.platform_dependencies("0.1.0"))
+        for platform in release.TARGETS.values():
+            with tarfile.open(assets / f"agy-delegate-rs-{platform}-0.1.0.tgz") as bundle:
+                members = {item.name: item for item in bundle.getmembers()}
                 name = "agy-delegate-rs.exe" if platform.startswith("win32") else "agy-delegate-rs"
-                member = members[f"package/bin/{platform}/{name}"]
+                member = members[f"package/bin/{name}"]
                 self.assertEqual(bundle.extractfile(member).read(), f"binary:{platform}".encode())
                 if not platform.startswith("win32"):
                     self.assertTrue(member.mode & 0o111)
-            self.assertNotIn("package/VALIDATION.md", members)
-            manifest = json.load(bundle.extractfile("package/package.json"))
-            self.assertEqual(manifest["repository"]["url"], "git+https://github.com/example/agy-delegate-rs.git")
+                self.assertEqual(set(members), {
+                    "package/package.json", f"package/bin/{name}", "package/README.md", "package/LICENSE",
+                })
+                manifest = json.load(bundle.extractfile("package/package.json"))
+                self.assertEqual(manifest["name"], f"agy-delegate-rs-{platform}")
+                self.assertEqual(manifest["version"], "0.1.0")
+                system, cpu = platform.split("-")
+                self.assertEqual(manifest["os"], [system])
+                self.assertEqual(manifest["cpu"], [cpu])
         for line in (assets / "SHA256SUMS").read_text().splitlines():
             digest, name = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((assets / name).read_bytes()).hexdigest())
-        self.assertEqual(len(list(assets.iterdir())), 8)
+        self.assertEqual(len(list(assets.iterdir())), 14)
+        # Replace only registry locations for an offline installation test;
+        # all native tarballs retain their generated os/cpu restrictions.
+        package = output / "npm"
+        manifest = json.loads((package / "package.json").read_text())
+        manifest["optionalDependencies"] = {
+            name: (assets / f"{name}-0.1.0.tgz").as_uri()
+            for name in release.platform_dependencies("0.1.0")
+        }
+        (package / "package.json").write_text(json.dumps(manifest))
+        local = output / "local"
+        local.mkdir()
+        release.command("npm", "pack", "--silent", "--ignore-scripts", "--pack-destination", str(local), cwd=package)
+        for platform in release.TARGETS.values():
+            with self.subTest(install=platform):
+                system, cpu = platform.split("-")
+                prefix = output / f"install-{platform}"
+                release.command(
+                    "npm", "install", "--ignore-scripts", "--offline", "--no-audit", "--no-fund",
+                    "--package-lock=false", f"--os={system}", f"--cpu={cpu}", "--prefix", str(prefix),
+                    str(local / "agy-delegate-rs-0.1.0.tgz"),
+                )
+                installed = {p.name for p in (prefix / "node_modules").glob("agy-delegate-rs-*")}
+                self.assertEqual(installed, {f"agy-delegate-rs-{platform}"})
 
     def test_public_release_reuse_verifies_integrity_without_replacing_archives(self):
         output = self.root / "dist"
@@ -135,8 +184,13 @@ class ReleaseTests(unittest.TestCase):
         archive.write_bytes(b"repacked")
         release.reuse_assets(published, assets)
         self.assertEqual(archive.read_bytes(), (published / archive.name).read_bytes())
-        (published / "agy-delegate-rs-0.1.0.tgz").write_bytes(b"corrupt")
-        with self.assertRaises(ValueError):
+        (published / "agy-delegate-rs-linux-arm64-0.1.0.tgz").write_bytes(b"different valid publication")
+        checksums = [
+            f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}\n"
+            for item in sorted(published.iterdir()) if item.name != "SHA256SUMS"
+        ]
+        (published / "SHA256SUMS").write_text("".join(checksums))
+        with self.assertRaisesRegex(ValueError, "npm payload differs"):
             release.reuse_assets(published, assets)
 
     def test_crate_publication_checks_existing_and_ambiguous_uploads(self):

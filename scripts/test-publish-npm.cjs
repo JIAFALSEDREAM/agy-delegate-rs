@@ -10,7 +10,7 @@ const payload = Buffer.from("package fixture");
 const integrity = `sha512-${crypto.createHash("sha512").update(payload).digest("base64")}`;
 const missing = { status: 1, value: { error: { code: "E404" } } };
 const present = { status: 0, value: integrity };
-function scenario(queries, publishStatus = 0) {
+function scenario(queries, publishStatus = 0, name = "agy-delegate-rs") {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-npm-publish-"));
   try {
     fs.writeFileSync(path.join(directory, "package.tgz"), payload);
@@ -23,7 +23,7 @@ const scenario=JSON.parse(fs.readFileSync(path.join(root,"scenario.json")));
 if(args[0]==="view"){const result=scenario.queries[Math.min(index,scenario.queries.length-1)];console.log(JSON.stringify(result.value));process.exit(result.status)}
 if(args[0]==="publish")process.exit(scenario.publishStatus);process.exit(99);
 `, { mode: 0o755 });
-    const result = spawnSync(process.execPath, [path.join(__dirname, "publish-npm.mjs"), path.join(directory, "package.tgz"), "0.1.0"], {
+    const result = spawnSync(process.execPath, [path.join(__dirname, "publish-npm.mjs"), path.join(directory, "package.tgz"), "0.1.0", name], {
       env: { ...process.env, FIXTURE: directory, PATH: `${directory}${path.delimiter}${process.env.PATH}` }, encoding: "utf8", timeout: 15000,
     });
     if (result.error) throw result.error;
@@ -35,6 +35,13 @@ test("identical immutable npm versions are skipped", () => {
   const result = scenario([present]);
   assert.equal(result.status, 0);
   assert.equal(result.calls.length, 1);
+});
+test("platform package reconciliation queries the platform package, not the entry", () => {
+  for (const platform of ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64"]) {
+    const result = scenario([present], 0, `agy-delegate-rs-${platform}`);
+    assert.equal(result.status, 0);
+    assert.equal(result.calls[0][1], `agy-delegate-rs-${platform}@0.1.0`);
+  }
 });
 test("different artifacts and registry outages prevent publication", () => {
   for (const query of [{ status: 0, value: "different" }, { status: 1, value: { error: { code: "E500" } } }]) {

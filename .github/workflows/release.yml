@@ -181,7 +181,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: npm-package
-          path: dist/assets/agy-delegate-rs-*.tgz
+          path: dist/assets/*.tgz
           if-no-files-found: error
 
   npm:
@@ -204,7 +204,11 @@ jobs:
       - name: Publish npm using trusted publishing
         env:
           VERSION: ${{ needs.validate.outputs.version }}
-        run: node scripts/publish-npm.mjs "dist/agy-delegate-rs-$VERSION.tgz" "$VERSION"
+        run: |
+          for package in $(node -p 'Object.keys(require("./npm/package.json").optionalDependencies).join(" ")'); do
+            node scripts/publish-npm.mjs "dist/$package-$VERSION.tgz" "$VERSION" "$package"
+          done
+          node scripts/publish-npm.mjs "dist/agy-delegate-rs-$VERSION.tgz" "$VERSION"
 
   crates:
     needs: [validate, github]
