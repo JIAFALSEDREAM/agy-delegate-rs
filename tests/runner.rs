@@ -242,27 +242,27 @@ async fn stderr_is_drained_and_non_utf8_is_lossy() {
 #[tokio::test]
 async fn oversized_unterminated_frame_is_rejected() {
     let error = fake("head -c 5000000 /dev/zero").await.unwrap_err();
-    assert!(error.to_string().contains("exceeded 4 MB"));
+    assert!(format!("{error:#}").contains("exceeded 4 MB"), "{error:#}");
 }
 #[tokio::test]
 async fn non_object_terminal_is_protocol_failure() {
+    let error = fake("printf '%s\\n' '{\"event\":\"result\",\"result\":[]}'")
+        .await
+        .unwrap_err();
     assert!(
-        fake("printf '%s\\n' '{\"event\":\"result\",\"result\":[]}'")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid or duplicate terminal")
+        format!("{error:#}").contains("Invalid or duplicate terminal"),
+        "{error:#}"
     );
 }
 
 #[tokio::test]
 async fn backend_cannot_spoof_process_ownership() {
+    let error = fake("printf '%s\\n' '{\"event\":\"sandbox_started\",\"pid\":null}'")
+        .await
+        .unwrap_err();
     assert!(
-        fake("printf '%s\\n' '{\"event\":\"sandbox_started\",\"pid\":null}'")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("Reserved internal event")
+        format!("{error:#}").contains("Reserved internal event"),
+        "{error:#}"
     );
 }
 

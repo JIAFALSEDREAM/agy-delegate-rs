@@ -628,7 +628,15 @@ Keep the final report within {} characters. Task follows:\n\n{task}",
     if let Some(scan) = profile_scan.take() {
         let _ = scan.await;
     }
-    let raw_log = stopped?;
+    let raw_log = match stopped {
+        Ok(raw_log) => raw_log,
+        Err(stop) => {
+            return Err(match result {
+                Err(primary) => primary.context(format!("Sandbox shutdown failed: {stop:#}")),
+                Ok(_) => stop,
+            });
+        }
+    };
     let diagnostics = match tokio::time::timeout(Duration::from_secs(1), &mut err_task.0).await {
         Ok(Ok(Ok(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
         _ => "Diagnostics unavailable or pipe did not close".into(),
