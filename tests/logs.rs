@@ -41,7 +41,7 @@ async fn exiting_leader_does_not_leave_a_descendant_reopening_raw_logs() {
 }
 
 #[test]
-fn dropped_runner_stops_reopening_backend_before_disposing_its_raw_log() {
+fn dropped_runner_stops_backend_and_disposes_or_marks_its_raw_log() {
     let state = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let script = state.path().join("agy.sh");
@@ -67,7 +67,7 @@ fn dropped_runner_stops_reopening_backend_before_disposing_its_raw_log() {
             async |_| Ok(()),
         ));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !pidfile.exists() {
+        while !pidfile.exists() || !state.path().join("tmp/agy.log").exists() {
             tokio::select! {
                 result = &mut running => panic!("Runner stopped early: {result:?}"),
                 _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
@@ -80,7 +80,18 @@ fn dropped_runner_stops_reopening_backend_before_disposing_its_raw_log() {
     drop(runtime);
     let pid: i32 = fs::read_to_string(pidfile).unwrap().trim().parse().unwrap();
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-    assert!(!state.path().join("tmp/agy.log").exists());
+    let marker = state.path().join("tmp/UNVERIFIED_PROCESS");
+    if marker.exists() {
+        // A stopped leader does not prove the entire process group was reaped.
+        assert!(
+            fs::read_to_string(marker)
+                .unwrap()
+                .contains("Raw log retained privately")
+        );
+        assert!(state.path().join("tmp/agy.log").exists());
+    } else {
+        assert!(!state.path().join("tmp/agy.log").exists());
+    }
 }
 
 #[test]

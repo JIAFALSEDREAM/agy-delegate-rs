@@ -738,10 +738,19 @@ impl Jobs {
                 use cap_std::fs::OpenOptionsExt;
                 options.custom_flags(libc::O_NONBLOCK);
             }
-            let file = self
-                .job_root
-                .open_with(".cleanup.lock", &options)
-                .context("Cannot open retention cleanup lock")?;
+            // Native macOS can report NotFound during concurrent first creation.
+            // Each retry keeps the same pinned root and refuses symlinks.
+            let mut retries = 0;
+            let file = loop {
+                match self.job_root.open_with(".cleanup.lock", &options) {
+                    Ok(file) => break file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound && retries < 3 => {
+                        retries += 1;
+                        std::thread::yield_now();
+                    }
+                    Err(error) => return Err(error).context("Cannot open retention cleanup lock"),
+                }
+            };
             ensure!(
                 file.metadata()
                     .context("Cannot inspect retention cleanup lock")?
