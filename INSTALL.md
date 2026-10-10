@@ -24,6 +24,14 @@ macOS 由 Codex 使用系统 Seatbelt；Windows 使用 Codex 的 unelevated 后�
 
 ## 构建与初始化
 
+发版后可以选择以下安装方式：
+
+- GitHub Releases：下载匹配架构的 `.tar.gz` 或 `.zip`，对照 `SHA256SUMS` 校验，解压后将二进制放入 PATH。
+- npm：`npm install -g agy-delegate-rs`，需要 Node.js 22.14+，不需要 Rust；包内附二进制，不使用安装脚本或额外下载。
+- crates.io：`cargo install agy-delegate-rs --locked`，需要前述 Rust 和 C 编译工具链。
+
+预编译包提供 Linux x64/arm64（musl 静态链接）、macOS x64/arm64、Windows x64。Windows arm64 原生包暂未提供。三种方式都不会安装 agy、Codex CLI 或 bubblewrap；首次集成执行 `agy-delegate-rs install`，成功后新开 Codex 会话。模型认证仍需真实调查验证。
+
 在仓库目录执行：
 
 ```sh
@@ -149,3 +157,27 @@ Unix worker 与沙箱组长均已退出、但仍有子进程存活且身份无�
 操作系统不能在期限内确认整个沙箱进程组结束时，任务会失败，tmp/UNVERIFIED_PROCESS 标记会说明原始日志仍保留在私有目录中；此时日志不能视为已脱敏。先确认并停止相关进程，再处理日志和清理。卸载会拒绝无法核验的任务目录。
 
 卸载的取消范围是选中的 state_dir，包括 CLI 任务，即使当前 Codex 配置目录没有 Rust 注册也会停止该任务池。多个 Codex 配置目录共用状态目录时共用任务池和清理策略；需要隔离任务时，请分别配置 state_dir。程序会在关闭检查期间阻止新提交；遇到正在提交或启动的任务时需稍后重试卸载。
+
+## 维护者发版
+
+`.github/workflows/release.yml` 仅由推送 `v*.*.*` tag 触发，进一步限制为稳定版本 `vMAJOR.MINOR.PATCH`。tag 指向的提交必须在仓库默认主分支历史中，且 tag、`Cargo.toml` 和 `npm/package.json` 版本一致；不符合时终止，不发布。
+
+首次发版前完成一次性设置：
+
+1. 将仓库推到 `JIAFALSEDREAM/agy-delegate-rs`，默认主分支设为 `main`，启用 Actions。
+2. 在仓库 Actions Secrets 中添加 `CARGO_REGISTRY_TOKEN`，需有发布 `agy-delegate-rs` 的权限。npm 不使用这个 token，也无需 `NPM_TOKEN`。
+3. npm 的 `agy-delegate-rs` 包必须由你的账号持有。若包还不存在，首次创建需手动发布：可从首次运行生成的 GitHub Release 下载 `agy-delegate-rs-VERSION.tgz`，本地登录 npm 后执行 `npm publish ./agy-delegate-rs-VERSION.tgz --access public`。此时首次 workflow 的 npm job 失败属于尚未配置可信发布，应完成配置后重跑该 job。
+4. 在 npm 包设置的 Trusted Publisher 中选择 GitHub Actions，填写 owner `JIAFALSEDREAM`、仓库名 `agy-delegate-rs`、workflow 文件名 `release.yml`，不填 Environment。允许直接 `npm publish`；新配置默认的 staged publishing 权限不代替此项。当前 npm 文档要求首次成功使用新配置在 2 天内完成，超时需重建配置。
+
+Cargo/npm 元数据中的仓库地址必须与 Actions 的实际仓库一致，发版前会核对。版本与源代码保持 tag 内容，crate 打包要求工作区干净。本地未提交的验收文档不会进入 crate 或 npm 包。
+
+每次发版修改 Cargo/npm 两处版本，提交到主分支后打 tag 并推送。例如两处版本均为 `0.1.0` 时：
+
+```sh
+git tag -a v0.1.0 -m 'Release v0.1.0'
+git push origin v0.1.0
+```
+
+流程先验证并在五个平台构建、执行测试与原生沙箱检查，生成二进制压缩包、npm 安装包和 SHA-256 清单；全部构建通过后发布 GitHub Release，再分别发布 npm 和 crate。跨平台的模型认证仍需实机验收，CI 不会调用模型。
+
+三个渠道不是原子事务。部分渠道失败时，在 Actions 重跑失败的 job；npm 和 crate 若已有相同版本，会比较现有包的完整性摘要，相同才跳过，不会覆盖不同内容。已公开的 GitHub Release 会校验并复用原资产，npm 内容不匹配时拒绝继续；只允许替换尚未公开的草稿资产。首次 npm 手动发布后也应重跑同一 job，以复用原安装包。不要删除已发布版本的 tag 后重复发不同内容；修复并提升版本再发。
