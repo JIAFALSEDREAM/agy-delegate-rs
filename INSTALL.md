@@ -2,7 +2,7 @@
 
 ## 前提
 
-- Rust 1.88 或更新版本，以及本平台的 C 编译工具链（Linux 常用 GCC/Clang，macOS 使用 Xcode Command Line Tools，Windows 按所选 Rust 工具链安装相应构建工具）；本项目编译 SQLite。
+- 从源码安装需要 Rust 1.88 或更新版本，以及本平台的 C 编译工具链（Linux 常用 GCC/Clang，macOS 使用 Xcode Command Line Tools，Windows 按所选 Rust 工具链安装相应构建工具）；本项目编译 SQLite。npm 和 GitHub Release 预编译包无需这些构建工具。
 - 已安装能提供 `agy` 命令、stream-json 接口和 `--gemini_dir` 数据目录参数的 Antigravity CLI，且用户已有的登录或 API 配置能正常调用模型；本项目不安装或代管 agy。
 - 支持命名权限配置的 Codex CLI。本机验证版本为 0.160.0；Linux 还需要 bubblewrap 和允许创建用户命名空间的环境。
 
@@ -18,19 +18,19 @@ Linux 的 Debian/Ubuntu 系统可安装 bubblewrap：
 sudo apt-get install bubblewrap
 ```
 
-macOS 由 Codex 使用系统 Seatbelt；Windows 使用 Codex 的 unelevated 后端。当前已在 Linux 验证实际沙箱，Windows/macOS 的 Rust 代码检查已通过，实际沙箱仍需在对应系统验收。
+macOS 由 Codex 使用系统 Seatbelt；Windows 使用 Codex 的 unelevated 后端。Linux、macOS、Windows 的 x86_64 与 ARM64 共六种原生 CI 环境均已通过测试，并验证项目读取、写入被拒及临时目录可写。
 
 当前模型验收使用用户已有的 API/转换服务，原生 OAuth 登录、系统钥匙串访问和令牌刷新尚未实测。三端都依赖本机 Codex CLI，本项目通过它运行操作系统沙箱。
 
 ## 构建与初始化
 
-发版后可以选择以下安装方式：
+可以选择以下安装方式：
 
 - GitHub Releases：下载匹配架构的 `.tar.gz` 或 `.zip`，对照 `SHA256SUMS` 校验，解压后将二进制放入 PATH。
 - npm：`npm install -g agy-delegate-rs`，需要 Node.js 22.14+，不需要 Rust；包内附二进制，不使用安装脚本或额外下载。
 - crates.io：`cargo install agy-delegate-rs --locked`，需要前述 Rust 和 C 编译工具链。
 
-预编译包提供 Linux x64/arm64（musl 静态链接）、macOS x64/arm64、Windows x64。Windows arm64 原生包暂未提供。三种方式都不会安装 agy、Codex CLI 或 bubblewrap；首次集成执行 `agy-delegate-rs install`，成功后新开 Codex 会话。模型认证仍需真实调查验证。
+预编译包提供 Linux x64/arm64（musl 静态链接）、macOS x64/arm64、Windows x64/arm64，共六种组合。三种方式都不会安装 agy、Codex CLI 或 bubblewrap；首次集成执行 `agy-delegate-rs install`，成功后新开 Codex 会话。模型认证仍需真实调查验证。
 
 在仓库目录执行：
 
@@ -94,9 +94,9 @@ agy-delegate-rs install --codex-home /absolute/path/codex-home
 
 `install` 先运行离线 doctor，通过后注册 `agy-delegate-rs` MCP 并写入受管理的 AGENTS 策略。已有 Python 注册或策略时会拒绝覆盖；确认 Rust 版可用后，再手动移除旧的注册与受管理策略。外部协议转换服务可以继续保留。
 
-注册会保存当前有效配置（包括命令行覆盖）的快照，后续修改配置需要重新执行 `register`。安装助手不安装或卸载 Cargo 二进制；这仍由 `cargo install/uninstall` 管理。不会创建另一套启动器。
+注册会保存当前有效配置（包括命令行覆盖）的快照，后续修改配置需要重新执行 `register`。安装助手管理配置与 MCP 集成；程序文件通过所选的 npm、Cargo 或 GitHub Release 安装渠道管理。
 
-注册归属同时核对当前二进制路径和本 Codex 目录的配置快照。沿用固定 Cargo 安装路径的升级可以重新注册；要移动二进制，请先从原路径执行 `uninstall`，移动后再安装集成。程序不会自动接管来自其它二进制路径的注册。
+注册归属同时核对当前二进制路径和本 Codex 目录的配置快照。沿用固定安装路径的升级可以重新注册；要移动二进制或切换安装渠道，请先从原路径执行 `uninstall`，移动后再安装集成。程序不会自动接管来自其它二进制路径的注册。
 
 安装、注册和卸载会互斥本工具的操作，并在关闭任务后重新核对注册归属。Codex 自身的配置写入没有共享锁或条件更新接口；操作期间请勿同时运行其它 `codex mcp add/remove` 或手动编辑同一配置。外部并发写入仍可能互相覆盖。
 
@@ -148,7 +148,7 @@ agy-delegate-rs cleanup
 
 Unix worker 与沙箱组长均已退出、但仍有子进程存活且身份无法核实时，取消会报错并阻止追问，需要人工清理；当前没有独立监督进程。
 
-先运行 `agy-delegate-rs uninstall`，取消并确认本状态目录的任务停止、撤销匹配的 MCP 注册并恢复受管理策略，再运行 `cargo uninstall agy-delegate-rs`。无法确认任务停止或策略已编辑时，助手拒绝继续删除集成。该操作不会自动删除配置、任务历史或用户 agy 配置；数据清理由用户单独决定。
+先运行 `agy-delegate-rs uninstall`，取消并确认本状态目录的任务停止、撤销匹配的 MCP 注册并恢复受管理策略，再卸载程序：npm 安装使用 `npm uninstall -g agy-delegate-rs`，Cargo 安装使用 `cargo uninstall agy-delegate-rs`，GitHub Release 安装则删除自行放置的二进制。无法确认任务停止或策略已编辑时，助手拒绝继续删除集成。该操作不会自动删除配置、任务历史或用户 agy 配置；数据清理由用户单独决定。
 
 任务运行期间每 100 毫秒检查应用日志大小；超限即终止任务，结束后保留的日志会截断并脱敏。独立会话目录在启动前、运行中每轮约 2 秒及停止后检查文件总大小，超出 `profile_bytes` 会终止整个沙箱进程组。扫描不跟随符号链接，无法安全扫描时任务失败。取消、超时或已有执行错误会保留原状态与诊断，并附加结束检查的错误。
 
@@ -177,11 +177,11 @@ npm trust github agy-delegate-rs --repo JIAFALSEDREAM/agy-delegate-rs --file rel
 
 Cargo/npm 元数据中的仓库地址必须与 Actions 的实际仓库一致，发版前会核对。版本与源代码保持 tag 内容，crate 打包要求工作区干净。本地未提交的验收文档不会进入 crate 或 npm 包。
 
-每次发版修改 Cargo/npm 两处版本，提交到主分支后打 tag 并推送。例如两处版本均为 `0.1.0` 时：
+每次发版修改 Cargo/npm 两处版本，并更新 `Cargo.lock` 中的本包版本，提交到主分支后打 tag 并推送。例如两处版本均为 `0.1.1` 时：
 
 ```sh
-git tag -a v0.1.0 -m 'Release v0.1.0'
-git push origin v0.1.0
+git tag -a v0.1.1 -m 'Release v0.1.1'
+git push origin v0.1.1
 ```
 
 流程先验证，并在 Linux、macOS、Windows 的 x86_64 与 ARM64 六种原生环境构建、执行测试与原生沙箱检查，生成二进制压缩包、npm 安装包和 SHA-256 清单；全部构建通过后发布 GitHub Release，再分别发布 npm 和 crate。跨平台的模型认证仍需实机验收，CI 不会调用模型。
