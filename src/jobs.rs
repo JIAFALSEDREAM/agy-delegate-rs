@@ -310,6 +310,7 @@ impl Jobs {
             !task.trim().is_empty() && task.chars().count() <= 24000,
             "Task must contain 1–24000 characters"
         );
+        ensure!(cwd.to_str().is_some(), "Working directory must be UTF-8");
         let cwd = cwd.canonicalize()?;
         ensure!(cwd.is_dir(), "cwd must be a directory");
         if let Some(parent) = parent {

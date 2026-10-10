@@ -448,7 +448,10 @@ fn non_utf8_paths_fail_without_panicking() {
     let repo = root
         .path()
         .join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
-    std::fs::create_dir(&repo).unwrap();
+    // APFS rejects invalid UTF-8 filenames before they can reach the application.
+    if let Err(error) = std::fs::create_dir(&repo) {
+        assert_eq!(error.raw_os_error(), Some(libc::EILSEQ));
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"))
         .arg("--state-dir")
         .arg(state.path())
