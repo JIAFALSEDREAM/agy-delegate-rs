@@ -177,11 +177,11 @@ npm trust github agy-delegate-rs --repo JIAFALSEDREAM/agy-delegate-rs --file rel
 
 Cargo/npm 元数据中的仓库地址必须与 Actions 的实际仓库一致，发版前会核对。版本与源代码保持 tag 内容，crate 打包要求工作区干净。本地未提交的验收文档不会进入 crate 或 npm 包。
 
-每次发版修改 Cargo/npm 两处版本，并更新 `Cargo.lock` 中的本包版本，提交到主分支后打 tag 并推送。例如两处版本均为 `0.1.2` 时：
+每次发版修改 Cargo/npm 两处版本，并更新 `Cargo.lock` 中的本包版本，提交到主分支后打 tag 并推送。例如两处版本均为 `0.1.3` 时：
 
 ```sh
-git tag -a v0.1.2 -m 'Release v0.1.2'
-git push origin v0.1.2
+git tag -a v0.1.3 -m 'Release v0.1.3'
+git push origin v0.1.3
 ```
 
 流程先验证，并在 Linux、macOS、Windows 的 x86_64 与 ARM64 六种原生环境构建、执行测试与原生沙箱检查，生成二进制压缩包、npm 安装包和 SHA-256 清单；全部构建通过后发布 GitHub Release，再分别发布 npm 和 crate。跨平台的模型认证仍需实机验收，CI 不会调用模型。
