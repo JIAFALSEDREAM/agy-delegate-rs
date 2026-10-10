@@ -246,10 +246,9 @@ fn finish_log(root: &Dir, limit: u64, redactor: &crate::redaction::Redactor) -> 
         match root.remove_file("agy.log") {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => anyhow::bail!(
-                "Cannot sanitize agy log: {}; Cannot discard raw log: {error}",
-                failure
-            ),
+            Err(error) => {
+                anyhow::bail!("Cannot sanitize agy log: {failure}; Cannot discard raw log: {error}")
+            }
         }
     }
     ensure!(!result?, "agy log exceeded configured log_bytes limit");
