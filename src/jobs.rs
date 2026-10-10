@@ -730,8 +730,16 @@ impl Jobs {
                 use cap_std::fs::OpenOptionsExt;
                 options.custom_flags(libc::O_NONBLOCK);
             }
-            let file = self.job_root.open_with(".cleanup.lock", &options)?;
-            ensure!(file.metadata()?.is_file(), "Unsafe cleanup lock");
+            let file = self
+                .job_root
+                .open_with(".cleanup.lock", &options)
+                .context("Cannot open retention cleanup lock")?;
+            ensure!(
+                file.metadata()
+                    .context("Cannot inspect retention cleanup lock")?
+                    .is_file(),
+                "Unsafe cleanup lock"
+            );
             let file = file.into_std();
             match file.try_lock_exclusive() {
                 Ok(()) => Some(file),
@@ -746,7 +754,7 @@ impl Jobs {
             }
         };
         let directory = self.state.join("jobs");
-        let mut db = self.db()?;
+        let mut db = self.db().context("Cannot open cleanup database")?;
         let rows = {
             let mut query =
                 db.prepare("SELECT id,root,status,updated FROM jobs ORDER BY (status='purging') DESC,updated DESC,id")?;
@@ -833,7 +841,10 @@ impl Jobs {
                     let current = Dir::open_ambient_dir(&self.state, cap_std::ambient_authority())
                         .and_then(|state| state.open_dir_nofollow("jobs"))
                         .and_then(|root| root.dir_metadata());
-                    let expected = self.job_root.dir_metadata()?;
+                    let expected = self
+                        .job_root
+                        .dir_metadata()
+                        .context("Cannot inspect pinned job root during cleanup")?;
                     let current = match current {
                         Ok(current) => current,
                         Err(error) => {
