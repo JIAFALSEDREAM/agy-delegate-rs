@@ -88,9 +88,14 @@ fn persisted_lossy_stderr_respects_the_configured_byte_limit() {
     let state = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let script = state.path().join("agy.sh");
-    fs::write(&script, "cat >/dev/null\nhead -c 4096 /dev/zero | tr '\\000' '\\377' >&2\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'\n").unwrap();
+    fs::write(&script, "cat >/dev/null\npython3 -c 'import os; os.write(2, bytes([255]) * 4096)'\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'\n").unwrap();
     let output = invoke(state.path(), repo.path(), &script, "inspect");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     let bytes =
         fs::read(Path::new(result["local_log_dir"].as_str().unwrap()).join("stderr.log")).unwrap();

@@ -1526,7 +1526,24 @@ mod cleanup_concurrency {
                 .block_on(worker_jobs.worker(&worker_id))
         });
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while jobs.get(&running).unwrap()["status"] != "running" {
+        loop {
+            match jobs.get(&running) {
+                Ok(job) if job["status"] == "running" => break,
+                Ok(_) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<rusqlite::Error>()
+                        .is_some_and(|error| {
+                            matches!(
+                                error.sqlite_error_code(),
+                                Some(
+                                    rusqlite::ErrorCode::DatabaseBusy
+                                        | rusqlite::ErrorCode::DatabaseLocked
+                                )
+                            )
+                        }) => {}
+                Err(error) => panic!("Cannot query starting worker: {error:#}"),
+            }
             assert!(std::time::Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
