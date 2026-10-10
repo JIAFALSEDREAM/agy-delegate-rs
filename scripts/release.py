@@ -13,6 +13,7 @@ import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+DOCUMENTS = ("README.md", "README.en.md", "INSTALL.md", "INSTALL.en.md")
 TARGETS = {
     "x86_64-unknown-linux-musl": "linux-x64",
     "aarch64-unknown-linux-musl": "linux-arm64",
@@ -71,7 +72,7 @@ def archive(target, version, output):
     output.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, output / binary_name)
     stem = f"agy-delegate-rs-v{version}-{target}"
-    files = [(binary, binary_name)] + [(ROOT / name, name) for name in ("LICENSE", "README.md", "INSTALL.md")]
+    files = [(binary, binary_name)] + [(ROOT / name, name) for name in ("LICENSE", *DOCUMENTS)]
     if platform.startswith("win32"):
         with zipfile.ZipFile(output / f"{stem}.zip", "w", zipfile.ZIP_DEFLATED) as bundle:
             for source, name in files:
@@ -101,7 +102,7 @@ def assemble(artifacts, output, repository):
     package = output / "npm"
     shutil.copytree(ROOT / "npm", package)
     (package / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    for name in ("README.md", "LICENSE"):
+    for name in ("LICENSE", *DOCUMENTS):
         shutil.copy2(ROOT / name, package / name)
     assets = output / "assets"
     assets.mkdir()

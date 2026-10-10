@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
+import zipfile
 from unittest.mock import patch
 
 import release
@@ -30,12 +31,12 @@ class ReleaseTests(unittest.TestCase):
             "name": "agy-delegate-rs", "version": "0.1.0",
             "repository": {"url": "git+https://github.com/example/agy-delegate-rs.git"},
             "bin": {"agy-delegate-rs": "bin/agy-delegate-rs.cjs"},
-            "files": ["bin", "README.md", "LICENSE"],
+            "files": ["bin", "README.md", "README.en.md", "INSTALL.md", "INSTALL.en.md", "LICENSE"],
             "optionalDependencies": release.platform_dependencies("0.1.0"),
         }
         (self.root / "npm/package.json").write_text(json.dumps(self.manifest))
         (self.root / "npm/bin/agy-delegate-rs.cjs").write_text("#!/usr/bin/env node\n")
-        for name in ("LICENSE", "README.md", "INSTALL.md"):
+        for name in ("LICENSE", "README.md", "README.en.md", "INSTALL.md", "INSTALL.en.md"):
             (self.root / name).write_text(name)
         self.git("init", "-b", "main")
         self.git("config", "user.name", "Release test")
@@ -123,7 +124,8 @@ class ReleaseTests(unittest.TestCase):
         with tarfile.open(assets / "agy-delegate-rs-0.1.0.tgz") as bundle:
             members = {item.name: item for item in bundle.getmembers()}
             self.assertEqual(set(members), {
-                "package/package.json", "package/bin/agy-delegate-rs.cjs", "package/README.md", "package/LICENSE",
+                "package/package.json", "package/bin/agy-delegate-rs.cjs", "package/LICENSE",
+                "package/README.md", "package/README.en.md", "package/INSTALL.md", "package/INSTALL.en.md",
             })
             manifest = json.load(bundle.extractfile("package/package.json"))
             self.assertEqual(manifest["repository"]["url"], "git+https://github.com/example/agy-delegate-rs.git")
@@ -145,6 +147,16 @@ class ReleaseTests(unittest.TestCase):
                 system, cpu = platform.split("-")
                 self.assertEqual(manifest["os"], [system])
                 self.assertEqual(manifest["cpu"], [cpu])
+        for target, platform in release.TARGETS.items():
+            stem = f"agy-delegate-rs-v0.1.0-{target}"
+            if platform.startswith("win32"):
+                with zipfile.ZipFile(assets / f"{stem}.zip") as bundle:
+                    paths = set(bundle.namelist())
+            else:
+                with tarfile.open(assets / f"{stem}.tar.gz") as bundle:
+                    paths = set(bundle.getnames())
+            for name in ("README.md", "README.en.md", "INSTALL.md", "INSTALL.en.md"):
+                self.assertIn(f"{stem}/{name}", paths)
         for line in (assets / "SHA256SUMS").read_text().splitlines():
             digest, name = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((assets / name).read_bytes()).hexdigest())

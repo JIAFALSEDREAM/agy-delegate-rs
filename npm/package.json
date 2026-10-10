@@ -10,7 +10,7 @@
   "bin": {
     "agy-delegate-rs": "bin/agy-delegate-rs.cjs"
   },
-  "files": ["bin", "README.md", "LICENSE"],
+  "files": ["bin", "README.md", "README.en.md", "INSTALL.md", "INSTALL.en.md", "LICENSE"],
   "engines": {
     "node": ">=22.14.0"
   },

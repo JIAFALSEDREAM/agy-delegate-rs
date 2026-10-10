@@ -1,5 +1,7 @@
 # agy-delegate-rs
 
+简体中文 | [English](README.en.md)
+
 [![npm version](https://img.shields.io/npm/v/agy-delegate-rs?style=flat-square&logo=npm)](https://www.npmjs.com/package/agy-delegate-rs)
 [![crates.io version](https://img.shields.io/crates/v/agy-delegate-rs?style=flat-square&logo=rust)](https://crates.io/crates/agy-delegate-rs)
 [![GitHub release](https://img.shields.io/github/v/release/JIAFALSEDREAM/agy-delegate-rs?style=flat-square&logo=github)](https://github.com/JIAFALSEDREAM/agy-delegate-rs/releases/latest)

@@ -1,5 +1,7 @@
 # 安装与配置
 
+简体中文 | [English](INSTALL.en.md)
+
 ## 前提
 
 - 从源码安装需要 Rust 1.88 或更新版本，以及本平台的 C 编译工具链（Linux 常用 GCC/Clang，macOS 使用 Xcode Command Line Tools，Windows 按所选 Rust 工具链安装相应构建工具）；本项目编译 SQLite。npm 和 GitHub Release 预编译包无需这些构建工具。
