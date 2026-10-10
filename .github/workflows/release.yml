@@ -66,13 +66,16 @@ jobs:
             runner: macos-15
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

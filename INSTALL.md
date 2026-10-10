@@ -169,6 +169,12 @@ Unix worker 与沙箱组长均已退出、但仍有子进程存活且身份无�
 3. npm 的 `agy-delegate-rs` 包必须由你的账号持有。若包还不存在，首次创建需手动发布：可从首次运行生成的 GitHub Release 下载 `agy-delegate-rs-VERSION.tgz`，本地登录 npm 后执行 `npm publish ./agy-delegate-rs-VERSION.tgz --access public`。此时首次 workflow 的 npm job 失败属于尚未配置可信发布，应完成配置后重跑该 job。
 4. 在 npm 包设置的 Trusted Publisher 中选择 GitHub Actions，填写 owner `JIAFALSEDREAM`、仓库名 `agy-delegate-rs`、workflow 文件名 `release.yml`，不填 Environment。允许直接 `npm publish`；新配置默认的 staged publishing 权限不代替此项。当前 npm 文档要求首次成功使用新配置在 2 天内完成，超时需重建配置。
 
+npm 11.15+ 也可在首次发布后通过 CLI 配置可信发布（按提示在浏览器完成账号 2FA）：
+
+```sh
+npm trust github agy-delegate-rs --repo JIAFALSEDREAM/agy-delegate-rs --file release.yml --allow-publish --yes
+```
+
 Cargo/npm 元数据中的仓库地址必须与 Actions 的实际仓库一致，发版前会核对。版本与源代码保持 tag 内容，crate 打包要求工作区干净。本地未提交的验收文档不会进入 crate 或 npm 包。
 
 每次发版修改 Cargo/npm 两处版本，提交到主分支后打 tag 并推送。例如两处版本均为 `0.1.0` 时：
@@ -178,6 +184,6 @@ git tag -a v0.1.0 -m 'Release v0.1.0'
 git push origin v0.1.0
 ```
 
-流程先验证并在五个平台构建、执行测试与原生沙箱检查，生成二进制压缩包、npm 安装包和 SHA-256 清单；全部构建通过后发布 GitHub Release，再分别发布 npm 和 crate。跨平台的模型认证仍需实机验收，CI 不会调用模型。
+流程先验证，并在 Linux、macOS、Windows 的 x86_64 与 ARM64 六种原生环境构建、执行测试与原生沙箱检查，生成二进制压缩包、npm 安装包和 SHA-256 清单；全部构建通过后发布 GitHub Release，再分别发布 npm 和 crate。跨平台的模型认证仍需实机验收，CI 不会调用模型。
 
 三个渠道不是原子事务。部分渠道失败时，在 Actions 重跑失败的 job；npm 和 crate 若已有相同版本，会比较现有包的完整性摘要，相同才跳过，不会覆盖不同内容。已公开的 GitHub Release 会校验并复用原资产，npm 内容不匹配时拒绝继续；只允许替换尚未公开的草稿资产。首次 npm 手动发布后也应重跑同一 job，以复用原安装包。不要删除已发布版本的 tag 后重复发不同内容；修复并提升版本再发。

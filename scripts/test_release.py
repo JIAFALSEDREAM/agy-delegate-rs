@@ -122,7 +122,7 @@ class ReleaseTests(unittest.TestCase):
         for line in (assets / "SHA256SUMS").read_text().splitlines():
             digest, name = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((assets / name).read_bytes()).hexdigest())
-        self.assertEqual(len(list(assets.iterdir())), 7)
+        self.assertEqual(len(list(assets.iterdir())), 8)
 
     def test_public_release_reuse_verifies_integrity_without_replacing_archives(self):
         output = self.root / "dist"

@@ -42,7 +42,7 @@ function run(platform, arch, { exists = true, result = { status: 0 } } = {}) {
 }
 
 test("selects each supported binary and preserves arguments and exit status", () => {
-  for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["darwin", "x64"], ["darwin", "arm64"], ["win32", "x64"]]) {
+  for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["darwin", "x64"], ["darwin", "arm64"], ["win32", "x64"], ["win32", "arm64"]]) {
     const value = run(platform, arch, { result: { status: 17 } });
     assert.equal(value.exit, 17);
     assert.equal(value.spawn.binary, path.join("/package/bin", `${platform}-${arch}`, `agy-delegate-rs${platform === "win32" ? ".exe" : ""}`));
@@ -51,7 +51,7 @@ test("selects each supported binary and preserves arguments and exit status", ()
   }
 });
 test("unsupported and incomplete installations fail with an actionable message", () => {
-  const unsupported = run("win32", "arm64");
+  const unsupported = run("win32", "ia32");
   assert.equal(unsupported.exit, 1);
   assert.match(unsupported.error, /unsupported platform/);
   assert.equal(unsupported.spawn, undefined);
