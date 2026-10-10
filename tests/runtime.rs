@@ -132,7 +132,7 @@ fn doctor_passes_wrapper_prefix_to_version_and_help() {
         .arg("doctor")
         .bounded_output();
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    for name in ["agy", "agy_headless"] {
+    for name in ["agy", "codex", "agy_headless"] {
         assert_eq!(
             report["checks"]
                 .as_array()

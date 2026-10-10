@@ -78,7 +78,26 @@ pub fn wait(mut captured: Captured) -> Output {
 }
 pub fn backend(state: &Path) -> std::path::PathBuf {
     let path = state.join("codex");
-    fs::write(&path, "#!/bin/sh\nwhile [ \"$1\" != -- ]; do\nif [ \"$1\" = -C ]; then shift; cd \"$1\" || exit; fi\nshift\ndone\nshift\nexec \"$@\"\n").unwrap();
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+if [ "$1" = --version ]; then
+    echo 'codex-cli 0.160.0'
+    exit 0
+fi
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    if [ "$1" = -C ]; then
+        shift
+        cd "$1" || exit 99
+    fi
+    shift
+done
+[ "$#" -gt 0 ] || exit 99
+shift
+exec "$@"
+"#,
+    )
+    .unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     path
 }
