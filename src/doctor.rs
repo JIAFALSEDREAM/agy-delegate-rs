@@ -180,6 +180,7 @@ pub async fn diagnose_in(config: &Config, codex_home: Option<&Path>) -> Value {
     help.args(&config.agy_args);
     help.envs(&environment).arg("--help");
     let flags = [
+        "--model",
         "--input-format",
         "--output-format",
         "--disable-slash-commands",
@@ -194,8 +195,11 @@ pub async fn diagnose_in(config: &Config, codex_home: Option<&Path>) -> Value {
         flags
             .iter()
             .all(|flag| stdout.contains(flag) || stderr.contains(flag))
+            && (config.effort.is_none()
+                || stdout.contains("--effort")
+                || stderr.contains("--effort"))
     });
-    checks.push(json!({"name":"agy_headless","ok":supported,"detail":"Required stream-json and conversation flags"}));
+    checks.push(json!({"name":"agy_headless","ok":supported,"detail":"Required stream-json, conversation and model flags; --effort when configured"}));
     let state = config.state();
     checks.push(json!({"name":"state_directory","ok":state.is_ok(),"detail":"Local task storage"}));
     let sandbox_ok = match state {

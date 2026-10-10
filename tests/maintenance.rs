@@ -43,7 +43,7 @@ fn doctor_rejects_an_unsandboxed_backend_and_only_uses_agy_help() {
     std::fs::write(&config, "").unwrap();
     let agy = state.path().join("agy");
     let codex = state.path().join("codex");
-    std::fs::write(&agy, "#!/bin/sh\ncase \"$1\" in\n--version) printf 'agy 1.2.17+private-version-fixture'; printf 'Warning: private-diagnostic-fixture' >&2;;\n--help) echo '--input-format --output-format --disable-slash-commands --dangerously-skip-permissions --print-timeout --log-file --conversation' >&2;;\n*) exit 99;;\nesac\n").unwrap();
+    std::fs::write(&agy, "#!/bin/sh\ncase \"$1\" in\n--version) printf 'agy 1.2.17+private-version-fixture'; printf 'Warning: private-diagnostic-fixture' >&2;;\n--help) echo '--model --input-format --output-format --disable-slash-commands --dangerously-skip-permissions --print-timeout --log-file --conversation' >&2;;\n*) exit 99;;\nesac\n").unwrap();
     std::fs::write(&codex, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.160.0-alpha.1' >&2; exit; fi\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n").unwrap();
     for path in [&agy, &codex] {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -85,6 +85,31 @@ fn doctor_rejects_an_unsandboxed_backend_and_only_uses_agy_help() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains("private-diagnostic-fixture"));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("private-version-fixture"));
     assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 3);
+
+    // A backend without --effort still works with the complete model ID, but
+    // must fail the capability check when a separate effort is requested.
+    std::fs::write(&config, "effort = 'high'\n").unwrap();
+    let output = invoke(
+        state.path(),
+        &config,
+        &[
+            "--agy",
+            agy.to_str().unwrap(),
+            "--codex",
+            codex.to_str().unwrap(),
+            "doctor",
+        ],
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "agy_headless")
+            .unwrap()["ok"],
+        false
+    );
 }
 
 #[test]

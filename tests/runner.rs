@@ -45,6 +45,51 @@ async fn fake_secret(body: &str, secret: Option<&str>) -> anyhow::Result<serde_j
 const SUCCESS: &str = "printf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'";
 
 #[tokio::test]
+async fn every_task_passes_a_model_even_for_legacy_null_settings() {
+    for (model, effort) in [
+        (Some("gemini-3.8-flash-high"), None),
+        (None, None),
+        (Some("provider-flash-high"), None),
+        (Some("gemini-3.8-flash"), Some("high")),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = state.path().join("backend");
+        let expected = model.unwrap_or("gemini-3.8-flash-high");
+        let effort_check = match effort {
+            Some(effort) => format!("[ \"$actual_effort\" = '{effort}' ] || exit 97"),
+            None => "[ -z \"$actual_effort\" ] || exit 97".into(),
+        };
+        std::fs::write(
+            &backend,
+            format!(
+                "#!/bin/sh\nfound=0\nactual_effort=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --model) shift; [ \"$1\" = '{expected}' ] || exit 99; found=$((found + 1));;\n    --effort) shift; actual_effort=$1;;\n  esac\n  shift\ndone\n[ \"$found\" = 1 ] || exit 98\n{effort_check}\ncat >/dev/null\n{SUCCESS}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = Config {
+            codex: backend,
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            timeout: 2,
+            ..Config::default()
+        };
+        let result = runner::run(
+            &config,
+            repo.path(),
+            "inspect",
+            Some("existing-conversation"),
+            state.path(),
+            async |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "succeeded", "{result}");
+    }
+}
+
+#[tokio::test]
 async fn library_runner_rejects_invalid_log_limits_before_launch() {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {

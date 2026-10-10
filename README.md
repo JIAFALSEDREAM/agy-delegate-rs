@@ -11,6 +11,8 @@
 
 适合梳理入口与调用链、查找配置、统计文件、比较实现等调查任务。项目调用你已安装并配置好的 agy，不包含模型服务或 API 协议转换代理。
 
+默认使用 **Gemini 3.8 Flash (High)**（`gemini-3.8-flash-high`）。每次调查及续聊都会显式指定模型，用户在 agy 中切换模型不会影响本工具；也可通过本工具的配置或命令行覆盖。
+
 ## 快速开始
 
 ### 1. 准备依赖
@@ -89,6 +91,23 @@ agy-delegate-rs --agy-env-file /absolute/path/api.env run --cwd /absolute/path/t
 已有环境变量优先于环境文件中的值，环境文件内容不写入任务记录。`--model`、`--agy`、`--codex`、`--state-dir` 等覆盖参数放在子命令之前。
 
 需要配置文件时，先执行 `agy-delegate-rs init`，再编辑它输出的文件路径。默认位于系统用户配置目录下；Linux 通常为 `~/.config/agy-delegate-rs/config.toml`。配置修改后需重新执行 `register`，更新 MCP 使用的配置快照。
+
+默认模型配置如下；未创建配置文件或省略 `model` 时，也使用这个默认值：
+
+```toml
+model = "gemini-3.8-flash-high"
+```
+
+`gemini-3.8-flash-high` 是 agy 内置的模型标识，已经包含 High 思考等级。agy 1.3.2 也支持分开指定，两种方式选其一：
+
+```toml
+model = "gemini-3.8-flash"
+effort = "high"
+```
+
+对应命令行参数为 `--model gemini-3.8-flash --effort high`。裸模型名在 agy 中需要配合 `effort`；若模型名已有等级后缀，另设的 `effort` 必须与其一致。自定义 API 或协议转换服务应使用当前 agy/接口接受的模型标识，可通过 `agy models` 查看；登录认证与自定义接口的配置由 agy 管理，本工具不转换模型名或认证协议。模型不可用时任务失败，不自动切换到其它模型。
+
+升级前的配置若已显式指定其它模型，会保留该选择；旧任务快照中的空模型会回退到本工具默认值。要让已注册的 MCP 使用新默认模型，请确认本工具配置中的 `model`，再执行 `agy-delegate-rs register`。
 
 遇到环境或沙箱问题时，可运行 `agy-delegate-rs doctor` 检查配置、依赖和实际沙箱读写边界；模型认证仍需通过真实调查验证。
 

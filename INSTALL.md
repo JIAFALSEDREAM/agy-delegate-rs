@@ -63,6 +63,8 @@ agy-delegate-rs --config /absolute/path/config.toml doctor
 codex = "codex"
 agy = "agy"
 agy_args = []
+# Always passed explicitly; agy's interactive model selection does not affect tasks.
+model = "gemini-3.8-flash-high"
 log_bytes = 4000000
 profile_bytes = 128000000
 timeout = 600
@@ -70,11 +72,15 @@ report_chars = 4000
 retention_days = 14
 max_history_jobs = 1000
 # agy_env_file = "/absolute/path/api.env"
-# model = "your-model"
+# effort = "high"
 # state_dir = "/absolute/path/state"
 ```
 
 命令行参数优先于文件设置。配置覆盖参数放在子命令之前，例如 `agy-delegate-rs --model your-model --agy-env-file /absolute/path/api.env run --cwd /path/to/repo --task '梳理入口'`；`--config` 和 `--timeout` 也可以放在子命令之后。文件中的相对路径以配置文件所在目录为基准；`agy`、`codex` 的单独程序名从 PATH 查找，指定相对程序路径时写成 `./bin/agy`。命令行路径以启动目录为基准。不支持自动展开 `~` 或路径中的环境变量，请写完整路径。
+
+`model` 默认是 agy 内置的 `gemini-3.8-flash-high`，即 Gemini 3.8 Flash (High)。新调查及续聊均显式传入该值，不沿用用户在 agy 中选中的模型。没有配置文件、配置中省略 `model`、旧快照中模型为 `null` 时，也使用此默认值；已有的非空模型配置保持优先。模型不可用时任务失败，不自动降级或切换。
+
+`effort` 是可选的思考等级，支持 `low`、`medium`、`high`、`xhigh`、`max`，具体可用等级由 agy 和所选模型决定。默认模型名已经包含 High，无需另设 `effort`。agy 1.3.2 支持裸名与等级分开指定：`model = "gemini-3.8-flash"` 配合 `effort = "high"`，或命令行 `--model gemini-3.8-flash --effort high`；若模型名已有等级后缀，单独设置的等级必须与后缀一致。自定义接口或协议转换服务应按 `agy models` 和接口实际接受的模型标识覆盖配置，本工具不自动改写模型名。
 
 `timeout` 为任务执行期限，范围 1–7200 秒；`report_chars` 限制后台任务查询返回的报告长度，范围 256–6000；`retention_days` 范围 1–365；`max_history_jobs` 范围 10–10000。后两项用于手动清理和 worker 保存任务结果后的自动清理。`agy_args` 放在托管的 agy 参数之前，例如 `agy = "node"` 配合 `agy_args = ["/absolute/path/agy.js"]`；也可重复传入 `--agy-arg`。参数中不要放凭据。`log_bytes` 范围 4096–32000000，限制单个 `agy.log` 及保留的 stderr；协议输出仍有独立的 4 MB 上限。`profile_bytes` 范围 1000000–1000000000，默认 128000000 字节，限制每个独立会话目录内的文件总大小，也可在子命令前传 `--profile-bytes`。
 

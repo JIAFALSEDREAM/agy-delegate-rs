@@ -121,7 +121,7 @@ fn automatic_cleanup_uses_the_submitted_retention_policy() {
 fn doctor_passes_wrapper_prefix_to_version_and_help() {
     let state = tempfile::tempdir().unwrap();
     let script = state.path().join("agy.sh");
-    fs::write(&script, "case \"$1\" in\n--version) echo 'agy 1.2.17';;\n--help) echo '--input-format --output-format --disable-slash-commands --dangerously-skip-permissions --print-timeout --log-file --conversation';;\n*) exit 99;;\nesac\n").unwrap();
+    fs::write(&script, "case \"$1\" in\n--version) echo 'agy 1.2.17';;\n--help) echo '--model --input-format --output-format --disable-slash-commands --dangerously-skip-permissions --print-timeout --log-file --conversation';;\n*) exit 99;;\nesac\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"))
         .arg("--state-dir")
         .arg(state.path())

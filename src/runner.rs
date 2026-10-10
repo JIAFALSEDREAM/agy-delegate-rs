@@ -430,8 +430,16 @@ pub(crate) async fn run_with_stop(
         .arg(format!("{}s", config.timeout))
         .arg("--log-file")
         .arg(tmp.join("agy.log"));
-    if let Some(model) = &config.model {
-        cmd.args(["--model", model]);
+    // Old job/registration snapshots may contain null; they still use our default.
+    cmd.args([
+        "--model",
+        config
+            .model
+            .as_deref()
+            .unwrap_or(crate::config::DEFAULT_MODEL),
+    ]);
+    if let Some(effort) = &config.effort {
+        cmd.args(["--effort", effort]);
     }
     if let Some(profile) = &profile {
         cmd.arg("--gemini_dir").arg(&profile.path);

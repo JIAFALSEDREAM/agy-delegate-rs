@@ -10,6 +10,10 @@ use std::{
 };
 use tokio::process::Command;
 
+pub const DEFAULT_MODEL: &str = "gemini-3.8-flash-high";
+
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 #[derive(Args, Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -22,8 +26,12 @@ pub struct Config {
     pub agy_args: Vec<String>,
     #[arg(long)]
     pub agy_env_file: Option<PathBuf>,
-    #[arg(long)]
+    /// Model for delegated tasks, independent of agy's interactive selection.
+    #[arg(long, default_value = DEFAULT_MODEL)]
     pub model: Option<String>,
+    /// Optional reasoning effort; omit when the model ID already specifies it.
+    #[arg(long, value_parser = EFFORTS)]
+    pub effort: Option<String>,
     #[arg(long, global = true, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
     pub timeout: u64,
     #[arg(long)]
@@ -48,7 +56,8 @@ impl Default for Config {
             agy: "agy".into(),
             agy_args: Vec::new(),
             agy_env_file: None,
-            model: None,
+            model: Some(DEFAULT_MODEL.into()),
+            effort: None,
             timeout: 600,
             state_dir: None,
             report_chars: 4000,
@@ -121,6 +130,15 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(model) = &self.model {
+            ensure!(!model.trim().is_empty(), "model must not be empty");
+        }
+        if let Some(effort) = &self.effort {
+            ensure!(
+                EFFORTS.contains(&effort.as_str()),
+                "effort must be low, medium, high, xhigh or max"
+            );
+        }
         ensure!(
             (1_000_000..=1_000_000_000).contains(&self.profile_bytes),
             "profile_bytes must be 1000000–1000000000"
@@ -194,6 +212,7 @@ impl Config {
             agy_args,
             agy_env_file,
             model,
+            effort,
             timeout,
             state_dir,
             report_chars,
@@ -210,7 +229,16 @@ impl Config {
         self.validate()?;
         self.resolve_paths(&std::env::current_dir()?);
         let text = format!(
-            "# Credentials belong in the inherited environment or a separate agy_env_file.\n{}\n# agy_env_file = \"/path/to/api.env\"\n# model = \"your-model\"\n# state_dir = \"/path/to/state\"\n",
+            "# Credentials belong in the inherited environment or a separate agy_env_file.\n\
+             # Default delegated model: Gemini 3.8 Flash (High), agy's built-in model ID.\n\
+             # Tasks always pass --model; changing agy's interactive model does not affect them.\n\
+             # Override model with the ID accepted by your agy/provider.\n\
+             # For the bare model gemini-3.8-flash, also set effort = \"high\".\n\
+             # A separate effort must agree with any effort suffix in the model ID.\n\
+             {}\n\
+             # agy_env_file = \"/path/to/api.env\"\n\
+             # effort = \"high\"\n\
+             # state_dir = \"/path/to/state\"\n",
             toml::to_string_pretty(&self)?
         );
         let absolute = std::env::current_dir()?.join(path);

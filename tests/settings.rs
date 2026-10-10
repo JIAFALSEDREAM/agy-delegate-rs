@@ -51,6 +51,44 @@ fn configuration_paths_and_explicit_cli_overrides() {
 }
 
 #[test]
+fn delegated_model_defaults_and_overrides_are_independent_of_agy() {
+    let cli = Arguments::try_parse_from(["fixture"]).unwrap().config;
+    assert_eq!(cli.model.as_deref(), Some("gemini-3.8-flash-high"));
+    assert_eq!(cli.effort, None);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(&file, "timeout = 12\n").unwrap();
+    assert_eq!(
+        load(&file, &[]).unwrap().model.as_deref(),
+        Some("gemini-3.8-flash-high")
+    );
+    std::fs::write(&file, "model = 'provider-model'\n").unwrap();
+    assert_eq!(
+        load(&file, &[]).unwrap().model.as_deref(),
+        Some("provider-model")
+    );
+    assert_eq!(
+        load(&file, &["--model", "gemini-3.8-flash-high"])
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("gemini-3.8-flash-high")
+    );
+}
+
+#[test]
+fn separate_effort_supports_bare_models_and_explicit_cli_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(&file, "model = 'gemini-3.8-flash'\neffort = 'medium'\n").unwrap();
+    assert_eq!(load(&file, &[]).unwrap().effort.as_deref(), Some("medium"));
+    let overridden = load(&file, &["--effort", "high"]).unwrap();
+    assert_eq!(overridden.model.as_deref(), Some("gemini-3.8-flash"));
+    assert_eq!(overridden.effort.as_deref(), Some("high"));
+    assert!(Arguments::try_parse_from(["fixture", "--effort", "invalid"]).is_err());
+}
+
+#[test]
 fn initialization_never_overwrites_or_copies_credentials() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested/config.toml");
@@ -69,6 +107,10 @@ fn initialization_never_overwrites_or_copies_credentials() {
     let contents = std::fs::read(&file).unwrap();
     assert!(!String::from_utf8_lossy(&contents).contains("secret-that-must-not-be-copied"));
     assert_eq!(load(&file, &[]).unwrap().retention_days, 14);
+    assert_eq!(
+        load(&file, &[]).unwrap().model.as_deref(),
+        Some("gemini-3.8-flash-high")
+    );
     assert!(Config::default().initialize(&file).is_err());
     assert_eq!(std::fs::read(&file).unwrap(), contents);
     assert_eq!(
@@ -100,6 +142,10 @@ fn malformed_unknown_and_out_of_range_settings_are_rejected() {
         "max_history_jobs = 9",
         "state_dir = ''",
         "codex = ''",
+        "model = ''",
+        "model = '   '",
+        "effort = ''",
+        "effort = 'invalid'",
         "secret = 'sensitive-fixture'",
         "model = 'sensitive-fixture",
     ] {
@@ -167,6 +213,7 @@ fn legacy_job_settings_remain_readable_and_reports_use_the_current_limit() {
     let legacy: Config = serde_json::from_value(json!({"codex":"codex","agy":"agy","agy_env_file":null,"model":null,"timeout":2,"state_dir":null})).unwrap();
     assert_eq!(legacy.max_history_jobs, 1000);
     assert_eq!(legacy.profile_bytes, 128_000_000);
+    assert_eq!(legacy.effort, None);
     let state = tempfile::tempdir().unwrap();
     let jobs = Jobs::new(Config {
         state_dir: Some(state.path().into()),
