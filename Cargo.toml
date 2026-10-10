@@ -6,6 +6,13 @@ rust-version = "1.88"
 license = "MIT"
 description = "Read-only agy investigations through the Codex OS sandbox"
 readme = "README.md"
+repository = "https://github.com/JIAFALSEDREAM/agy-delegate-rs"
+keywords = ["mcp", "sandbox", "cli", "agy"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "INSTALL.md", "LICENSE"]
+
+[profile.release]
+strip = true
 
 [dependencies]
 anyhow = "1"
