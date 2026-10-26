@@ -45,6 +45,27 @@ async fn fake_secret(body: &str, secret: Option<&str>) -> anyhow::Result<serde_j
 const SUCCESS: &str = "printf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'";
 
 #[tokio::test]
+async fn unreadable_instruction_imports_fail_before_starting_backend() {
+    let state = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("AGENTS.md"), "@missing-rules.md").unwrap();
+    let error = runner::run(
+        &Config::default(),
+        repo.path(),
+        "inspect",
+        None,
+        state.path(),
+        async |_| {
+            panic!("Backend must not start with missing instructions");
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("missing-rules.md"));
+    assert!(!state.path().join("tmp").exists());
+}
+
+#[tokio::test]
 async fn every_task_passes_a_model_even_for_legacy_null_settings() {
     for (model, effort) in [
         (Some("gemini-3.8-flash-high"), None),

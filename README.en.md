@@ -82,6 +82,8 @@ Exports never overwrite an existing file. See [running and cleanup](INSTALL.en.m
 
 Provide a precise investigation scope and an absolute repository path. Always check the returned status: failed, incomplete, or timed-out investigations must not be treated as completed. Retrieve detailed results with `agy_status` or `agy_wait`.
 
+For every investigation and follow-up, the host loads global instructions from `$CODEX_HOME` (default `~/.codex`) and directory instructions from the filesystem root through `cwd`. Each directory prefers `AGENTS.override.md` over `AGENTS.md`. Standalone `@file` references are expanded, supporting relative, absolute and `~/` paths; duplicate files and cycles are loaded once. The contents and source paths are injected so the investigator need not rediscover these rules. Additional local rules still apply when entering new subdirectories. Instructions are limited to 64 KiB and 32 files; read failures and limit violations produce an explicit error.
+
 ## Configuration and authentication
 
 Authentication environment variables are inherited by default. You can also load an existing environment file:

@@ -375,6 +375,7 @@ pub(crate) async fn run_with_stop(
         return Ok(json!({"status":"cancelled"}));
     }
     let cwd = cwd.canonicalize()?;
+    let prompt = crate::prompt::build(&cwd, task, config.report_chars)?;
     let tmp = private_dir(&dir.join("tmp"))?;
     let log_root = Arc::new(Dir::open_ambient_dir(&tmp, cap_std::ambient_authority())?);
     let raw_log = RawLog(log_root.clone(), true);
@@ -525,21 +526,6 @@ pub(crate) async fn run_with_stop(
         {
             return Ok(json!({"status":"cancelled"}));
         }
-        let prompt = format!(
-            "You are a read-only repository investigator delegated by a parent coding agent.\n\
-Complete the supplied bounded investigation independently using search and file-reading tools.\n\
-Follow applicable repository instructions. Do not modify files, run builds or tests, or spawn subagents.\n\
-The starting working directory is: {}\n\
-Use it as a starting point, not a read-access boundary. You may read relevant files elsewhere,\n\
-including parent instructions and dependencies. Keep searches focused and specify directories explicitly.\n\
-Read explicitly named files directly before searching.\n\
-Return: Conclusion, Essential evidence with precise file paths and line numbers,\n\
-and Uncertainty or the smallest useful next check. Omit command transcripts and unrelated inventories.\n\
-State clearly if permissions or missing information prevent completion.\n\
-Keep the final report within {} characters. Task follows:\n\n{task}",
-            cwd.display(),
-            config.report_chars
-        );
         let message = format!("{}\n", json!({"event":"user","message":{"content":prompt}}));
         let mut stdin = child.process().stdin().take().context("Missing stdin")?;
         if !notify(

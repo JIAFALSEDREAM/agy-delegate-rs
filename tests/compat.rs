@@ -108,6 +108,15 @@ fn multiline_task_file_reaches_backend_and_followup_in_the_same_conversation() {
     use std::os::unix::fs::PermissionsExt;
     let state = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
+    let codex_home = state.path().join("codex-home");
+    std::fs::create_dir(&codex_home).unwrap();
+    std::fs::write(
+        codex_home.join("AGENTS.md"),
+        "@./rules.md\nGLOBAL_INJECTED_RULE",
+    )
+    .unwrap();
+    std::fs::write(codex_home.join("rules.md"), "IMPORTED_COMMAND_RULE").unwrap();
+    std::fs::write(repo.path().join("AGENTS.md"), "LOCAL_INJECTED_RULE").unwrap();
     let backend = state.path().join("backend");
     std::fs::write(&backend, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TASK_CAPTURE.args\"\ncat > \"$TASK_CAPTURE\"\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":\"fixture\"}}'\n").unwrap();
     std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -121,6 +130,7 @@ fn multiline_task_file_reaches_backend_and_followup_in_the_same_conversation() {
             .arg("--codex")
             .arg(&backend)
             .env("TASK_CAPTURE", &capture)
+            .env("CODEX_HOME", &codex_home)
             .args(args)
             .output()
             .unwrap();
@@ -144,6 +154,16 @@ fn multiline_task_file_reaches_backend_and_followup_in_the_same_conversation() {
     );
     let delivered: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&capture).unwrap()).unwrap();
+    let prompt = delivered["message"]["content"].as_str().unwrap();
+    for rule in [
+        "GLOBAL_INJECTED_RULE",
+        "IMPORTED_COMMAND_RULE",
+        "LOCAL_INJECTED_RULE",
+    ] {
+        assert_eq!(prompt.matches(rule).count(), 1, "{rule}");
+    }
+    assert!(prompt.contains("Do not reread loaded instruction files"));
+    assert!(!prompt.contains("including parent instructions and dependencies"));
     assert!(
         delivered["message"]["content"]
             .as_str()
@@ -151,6 +171,7 @@ fn multiline_task_file_reaches_backend_and_followup_in_the_same_conversation() {
             .ends_with("检查\n第二行")
     );
     std::fs::write(&input, "进一步检查").unwrap();
+    std::fs::write(repo.path().join("AGENTS.md"), "UPDATED_LOCAL_RULE").unwrap();
     let follow = run(&[
         "followup",
         job["id"].as_str().unwrap(),
@@ -169,6 +190,9 @@ fn multiline_task_file_reaches_backend_and_followup_in_the_same_conversation() {
     );
     let delivered: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&capture).unwrap()).unwrap();
+    let prompt = delivered["message"]["content"].as_str().unwrap();
+    assert!(prompt.contains("UPDATED_LOCAL_RULE"));
+    assert!(!prompt.contains("LOCAL_INJECTED_RULE"));
     assert!(
         delivered["message"]["content"]
             .as_str()
