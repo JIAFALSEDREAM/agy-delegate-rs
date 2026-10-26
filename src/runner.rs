@@ -360,6 +360,58 @@ async fn profile_usage(profile: &crate::profiles::Profile, limit: u64) -> Result
     Ok(())
 }
 
+struct Deadline(tokio::time::Instant);
+impl Deadline {
+    fn new(timeout: Duration) -> Self {
+        Self(tokio::time::Instant::now() + timeout)
+    }
+    fn agy_timeout(&self) -> Result<String> {
+        let remaining = self
+            .0
+            .saturating_duration_since(tokio::time::Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "Task deadline exceeded before backend startup"
+        );
+        Ok(format!("{}ms", remaining.as_millis().max(1)))
+    }
+    fn bound<F: Future>(&self, future: F, grace: Duration) -> tokio::time::Timeout<F> {
+        tokio::time::timeout_at(self.0 + grace, future)
+    }
+}
+
+async fn prepare_prompt(
+    load: impl FnOnce() -> Result<String> + Send + 'static,
+    cancel: &Path,
+    stop: &AtomicBool,
+    deadline: &Deadline,
+) -> Result<Option<String>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    // Detached read-only IO must not hold Tokio shutdown or any job/profile lease open.
+    std::thread::Builder::new()
+        .name("agy-instructions".into())
+        .spawn(move || {
+            let _ = sender.send(load());
+        })
+        .context("Cannot start instruction loader")?;
+    let mut prompt = None;
+    let loaded = deadline
+        .bound(
+            notify(
+                async {
+                    prompt = Some(receiver.await.context("Instruction loader stopped")??);
+                    Ok(())
+                },
+                cancel,
+                stop,
+            ),
+            Duration::ZERO,
+        )
+        .await
+        .context("Instruction loading deadline exceeded")??;
+    Ok(if loaded { prompt } else { None })
+}
+
 pub(crate) async fn run_with_stop(
     config: &Config,
     cwd: &Path,
@@ -371,11 +423,24 @@ pub(crate) async fn run_with_stop(
 ) -> Result<Value> {
     let dir = paths.job;
     config.validate()?;
+    let deadline = Deadline::new(Duration::from_secs(config.timeout));
     if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
         return Ok(json!({"status":"cancelled"}));
     }
     let cwd = cwd.canonicalize()?;
-    let prompt = crate::prompt::build(&cwd, task, config.report_chars)?;
+    let prompt_cwd = cwd.clone();
+    let prompt_task = task.to_owned();
+    let report_chars = config.report_chars;
+    let Some(prompt) = prepare_prompt(
+        move || crate::prompt::build(&prompt_cwd, &prompt_task, report_chars),
+        &dir.join("cancel"),
+        stop,
+        &deadline,
+    )
+    .await?
+    else {
+        return Ok(json!({"status":"cancelled"}));
+    };
     let tmp = private_dir(&dir.join("tmp"))?;
     let log_root = Arc::new(Dir::open_ambient_dir(&tmp, cap_std::ambient_authority())?);
     let raw_log = RawLog(log_root.clone(), true);
@@ -428,7 +493,7 @@ pub(crate) async fn run_with_stop(
             "--dangerously-skip-permissions",
             "--print-timeout",
         ])
-        .arg(format!("{}s", config.timeout))
+        .arg(deadline.agy_timeout()?)
         .arg("--log-file")
         .arg(tmp.join("agy.log"));
     // Old job/registration snapshots may contain null; they still use our default.
@@ -608,9 +673,9 @@ pub(crate) async fn run_with_stop(
         }
         std::future::pending::<Result<Value>>().await
     };
-    let outcome = tokio::time::timeout(Duration::from_secs(config.timeout + 5), async {
+    let outcome = deadline.bound(async {
         tokio::select! { result = outcome => result, result = log_guard => result, result = profile_guard => result }
-    })
+    }, Duration::from_secs(5))
     .await;
     let result = match outcome {
         Ok(Ok(value)) => Ok(value),
@@ -701,6 +766,125 @@ pub(crate) async fn run_with_stop(
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn successful_preparation_consumes_the_backend_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = Deadline::new(Duration::from_secs(1));
+        assert!(
+            prepare_prompt(
+                || {
+                    std::thread::sleep(Duration::from_millis(250));
+                    Ok(String::new())
+                },
+                &dir.path().join("cancel"),
+                &AtomicBool::new(false),
+                &deadline
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        let milliseconds: u128 = deadline
+            .agy_timeout()
+            .unwrap()
+            .strip_suffix("ms")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            milliseconds <= 750,
+            "Backend received a fresh full budget: {milliseconds}"
+        );
+        assert!(
+            deadline
+                .bound(tokio::time::sleep(Duration::from_secs(2)), Duration::ZERO)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn instruction_timeout_does_not_delay_process_exit() {
+        const CHILD: &str = "AGY_INSTRUCTION_EXIT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let error = runtime
+                .block_on(prepare_prompt(
+                    || {
+                        std::thread::sleep(Duration::from_secs(30));
+                        Ok(String::new())
+                    },
+                    Path::new("unused-cancel-marker"),
+                    &AtomicBool::new(false),
+                    &Deadline::new(Duration::from_millis(10)),
+                ))
+                .unwrap_err();
+            assert!(error.to_string().contains("deadline"));
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runner::log_tests::instruction_timeout_does_not_delay_process_exit",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("Timed-out instruction read prevented process exit");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_instruction_loading_yields_to_cancellation_and_deadlines() {
+        for mode in ["flag", "file", "deadline"] {
+            let cancel = mode != "deadline";
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("cancel");
+            let flag = AtomicBool::new(false);
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let deadline = Deadline::new(Duration::from_millis(if cancel { 1000 } else { 10 }));
+            let future = prepare_prompt(
+                move || {
+                    let _ = wait.recv_timeout(Duration::from_secs(2));
+                    Ok("instructions".into())
+                },
+                &marker,
+                &flag,
+                &deadline,
+            );
+            tokio::pin!(future);
+            if cancel {
+                tokio::select! {
+                    _ = &mut future => panic!("Loading blocked the async cancellation timer"),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if mode == "file" { fs::write(&marker, "").unwrap(); }
+                        else { flag.store(true, Ordering::Relaxed); }
+                    },
+                }
+                assert!(future.await.unwrap().is_none());
+            } else {
+                assert!(future.await.unwrap_err().to_string().contains("deadline"));
+            }
+            let _ = release.send(());
+        }
+    }
 
     #[test]
     fn diagnostic_write_failure_does_not_skip_application_log_sanitization() {
