@@ -245,7 +245,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let codex_home = home.join(".codex");
-        let cwd = root.path().join("repo/child");
+        let cwd = root.path().join("repo/./child");
         fs::create_dir_all(&codex_home).unwrap();
         fs::create_dir_all(&cwd).unwrap();
         fs::write(codex_home.join("AGENTS.md"), "@./RTK.md\nGLOBAL_RULE").unwrap();
@@ -272,7 +272,8 @@ mod tests {
             previous = position;
         }
         assert!(!prompt.contains("SHADOWED_RULE"));
-        assert!(prompt.contains(&cwd.join("AGENTS.override.md").display().to_string()));
+        let source = cwd.join("AGENTS.override.md").canonicalize().unwrap();
+        assert!(prompt.contains(&format!("### Source: {}", source.display())));
     }
 
     #[test]
@@ -315,12 +316,7 @@ mod tests {
         assert!(build().unwrap_err().to_string().contains("missing.md"));
         fs::write(&agents, "@directory").unwrap();
         fs::create_dir(root.path().join("directory")).unwrap();
-        assert!(
-            build()
-                .unwrap_err()
-                .to_string()
-                .contains("not a regular file")
-        );
+        assert!(build().unwrap_err().to_string().contains("directory"));
         fs::write(&agents, "x".repeat(MAX_BYTES + 1)).unwrap();
         assert!(
             build()
