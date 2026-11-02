@@ -70,7 +70,7 @@ model = "gemini-3.8-flash-high"
 log_bytes = 4000000
 profile_bytes = 128000000
 timeout = 600
-report_chars = 4000
+report_chars = 4000 # 兼容旧配置，已忽略
 retention_days = 14
 max_history_jobs = 1000
 # agy_env_file = "/absolute/path/api.env"
@@ -84,7 +84,7 @@ max_history_jobs = 1000
 
 `effort` 是可选的思考等级，支持 `low`、`medium`、`high`、`xhigh`、`max`，具体可用等级由 agy 和所选模型决定。默认模型名已经包含 High，无需另设 `effort`。agy 1.3.2 支持裸名与等级分开指定：`model = "gemini-3.8-flash"` 配合 `effort = "high"`，或命令行 `--model gemini-3.8-flash --effort high`；若模型名已有等级后缀，单独设置的等级必须与后缀一致。自定义接口或协议转换服务应按 `agy models` 和接口实际接受的模型标识覆盖配置，本工具不自动改写模型名。
 
-`timeout` 为任务执行期限，范围 1–7200 秒；`report_chars` 限制后台任务查询返回的报告长度，范围 256–6000；`retention_days` 范围 1–365；`max_history_jobs` 范围 10–10000。后两项用于手动清理和 worker 保存任务结果后的自动清理。`agy_args` 放在托管的 agy 参数之前，例如 `agy = "node"` 配合 `agy_args = ["/absolute/path/agy.js"]`；也可重复传入 `--agy-arg`。参数中不要放凭据。`log_bytes` 范围 4096–32000000，限制单个 `agy.log` 及保留的 stderr；协议输出仍有独立的 4 MB 上限。`profile_bytes` 范围 1000000–1000000000，默认 128000000 字节，限制每个独立会话目录内的文件总大小，也可在子命令前传 `--profile-bytes`。
+`timeout` 为任务执行期限，范围 1–7200 秒；`report_chars` 和 `--report-chars` 仅为兼容旧调用保留并忽略，不再限制报告长度或委派提示；`retention_days` 范围 1–365；`max_history_jobs` 范围 10–10000。后两项用于手动清理和 worker 保存任务结果后的自动清理。`agy_args` 放在托管的 agy 参数之前，例如 `agy = "node"` 配合 `agy_args = ["/absolute/path/agy.js"]`；也可重复传入 `--agy-arg`。参数中不要放凭据。`log_bytes` 范围 4096–32000000，限制单个 `agy.log` 及保留的 stderr；协议输出仍有独立的 4 MB 上限。`profile_bytes` 范围 1000000–1000000000，默认 128000000 字节，限制每个独立会话目录内的文件总大小，也可在子命令前传 `--profile-bytes`。
 
 Rust 版不自动导入原 Python 项目的 `config.json` 或任务数据库；并行使用时保留各自独立的状态目录。需手动迁移已有程序路径、模型和环境文件路径，不要复制密钥到 TOML 配置中。
 
@@ -140,7 +140,7 @@ agy-delegate-rs cleanup --dry-run
 agy-delegate-rs cleanup
 ```
 
-`--task` 与 `--task-file` 二选一；`--task-file -` 从 stdin 读取 UTF-8。文件最多 96000 字节、任务最多 24000 个字符。`report` 读取完整存储结果，不受查询报告长度限制，导出时不覆盖已有文件。
+`--task` 与 `--task-file` 二选一；`--task-file -` 从 stdin 读取 UTF-8。文件最多 96000 字节、任务最多 24000 个字符。状态和等待接口返回完整报告，有报告时 `report_truncated` 为 `false`；列表接口仍只返回简短状态。`report` 读取完整存储结果，导出时不覆盖已有文件。
 
 后台任务由独立 worker 执行，MCP 服务关闭后仍继续；`wait` 超时不取消任务。状态默认在系统用户数据目录中，可用 `state_dir` 配置或 `--state-dir` 指定。
 

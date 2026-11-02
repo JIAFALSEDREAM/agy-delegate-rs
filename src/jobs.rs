@@ -300,11 +300,8 @@ impl Jobs {
         job.as_object_mut()
             .unwrap()
             .remove("cleanup_previous_status");
-        if let Some(report) = job["report"].as_str() {
-            let limit = self.config.report_chars as usize;
-            let truncated = report.chars().count() > limit;
-            job["report"] = report.chars().take(limit).collect::<String>().into();
-            job["report_truncated"] = truncated.into();
+        if job["report"].is_string() {
+            job["report_truncated"] = false.into();
         }
         Ok(job)
     }

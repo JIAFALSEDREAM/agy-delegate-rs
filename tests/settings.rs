@@ -137,7 +137,6 @@ fn malformed_unknown_and_out_of_range_settings_are_rejected() {
         "profile_bytes = 999999",
         "profile_bytes = 1000000001",
         "timeout = 0",
-        "report_chars = 6001",
         "retention_days = 366",
         "max_history_jobs = 9",
         "state_dir = ''",
@@ -209,7 +208,7 @@ fn cli_loads_file_before_opening_the_task_database() {
 }
 
 #[test]
-fn legacy_job_settings_remain_readable_and_reports_use_the_current_limit() {
+fn legacy_job_settings_remain_readable_and_reports_are_complete() {
     let legacy: Config = serde_json::from_value(json!({"codex":"codex","agy":"agy","agy_env_file":null,"model":null,"timeout":2,"state_dir":null})).unwrap();
     assert_eq!(legacy.max_history_jobs, 1000);
     assert_eq!(legacy.profile_bytes, 128_000_000);
@@ -222,7 +221,7 @@ fn legacy_job_settings_remain_readable_and_reports_use_the_current_limit() {
     })
     .unwrap();
     let id = uuid::Uuid::new_v4().to_string();
-    let report = "汉".repeat(300);
+    let report = format!("{}尾部证据与不确定性🦀", "汉".repeat(5000));
     let db = rusqlite::Connection::open(state.path().join("jobs.sqlite3")).unwrap();
     db.execute(
         "INSERT INTO jobs VALUES(?1,?1,'succeeded',0,?2)",
@@ -233,6 +232,22 @@ fn legacy_job_settings_remain_readable_and_reports_use_the_current_limit() {
     )
     .unwrap();
     let view = jobs.get(&id).unwrap();
-    assert_eq!(view["report"].as_str().unwrap().chars().count(), 256);
-    assert_eq!(view["report_truncated"], true);
+    assert_eq!(view["report"], report);
+    assert_eq!(view["report_truncated"], false);
+}
+
+#[test]
+fn deprecated_report_chars_accepts_legacy_config_and_cli_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    for value in [0, 256, 4000, 6001] {
+        std::fs::write(&file, format!("report_chars = {value}\n")).unwrap();
+        assert_eq!(load(&file, &[]).unwrap().report_chars, value);
+        assert_eq!(
+            load(&file, &["--report-chars", &value.to_string()])
+                .unwrap()
+                .report_chars,
+            value
+        );
+    }
 }

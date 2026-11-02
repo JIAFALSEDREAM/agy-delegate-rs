@@ -430,9 +430,8 @@ pub(crate) async fn run_with_stop(
     let cwd = cwd.canonicalize()?;
     let prompt_cwd = cwd.clone();
     let prompt_task = task.to_owned();
-    let report_chars = config.report_chars;
     let Some(prompt) = prepare_prompt(
-        move || crate::prompt::build(&prompt_cwd, &prompt_task, report_chars),
+        move || crate::prompt::build(&prompt_cwd, &prompt_task),
         &dir.join("cancel"),
         stop,
         &deadline,

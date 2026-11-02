@@ -70,7 +70,7 @@ model = "gemini-3.8-flash-high"
 log_bytes = 4000000
 profile_bytes = 128000000
 timeout = 600
-report_chars = 4000
+report_chars = 4000 # Legacy compatibility setting; ignored
 retention_days = 14
 max_history_jobs = 1000
 # agy_env_file = "/absolute/path/api.env"
@@ -89,7 +89,7 @@ Other settings:
 | Setting | Default | Purpose and range |
 | --- | --- | --- |
 | `timeout` | `600` | Task execution deadline, 1–7200 seconds |
-| `report_chars` | `4000` | Report length returned by task queries, 256–6000 characters |
+| `report_chars` | `4000` | Deprecated and ignored, as is `--report-chars`; no report or prompt limit |
 | `retention_days` | `14` | History retention, 1–365 days |
 | `max_history_jobs` | `1000` | History count limit, 10–10000 |
 | `log_bytes` | `4000000` | Limit for an individual agy log and retained stderr, 4096–32000000 bytes |
@@ -151,7 +151,7 @@ agy-delegate-rs cleanup --dry-run
 agy-delegate-rs cleanup
 ```
 
-Choose either `--task` or `--task-file`. `--task-file -` reads UTF-8 from stdin. Files are limited to 96000 bytes and tasks to 24000 characters. `report` returns the complete stored result regardless of query report limits; exports preserve existing files.
+Choose either `--task` or `--task-file`. `--task-file -` reads UTF-8 from stdin. Files are limited to 96000 bytes and tasks to 24000 characters. Status and wait interfaces return complete reports with `report_truncated: false` whenever a report is present; list interfaces still return compact status entries. `report` returns the complete stored result; exports preserve existing files.
 
 Independent background workers continue after the MCP server closes. A wait timeout does not cancel work. State defaults to the system user data directory, configurable with `state_dir` or `--state-dir`.
 

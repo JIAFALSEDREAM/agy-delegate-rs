@@ -23,7 +23,10 @@ fn complete_report_export_preserves_unicode_and_existing_files() {
     })
     .unwrap();
     let id = uuid::Uuid::new_v4().to_string();
-    let report = "证据\n".repeat(3000);
+    let report = format!(
+        "{}关键尾部证据：src/end.rs:42\n不确定性：仍需实机核验。🦀",
+        "证据\n".repeat(3000)
+    );
     let directory = jobs.state.join("jobs").join(&id);
     std::fs::create_dir(&directory).unwrap();
     let data = json!({"id":id,"root_id":id,"status":"incomplete","report":report,"progress":"x".repeat(200),"local_log_dir":directory});
@@ -33,7 +36,9 @@ fn complete_report_export_preserves_unicode_and_existing_files() {
         rusqlite::params![id, data.to_string()],
     )
     .unwrap();
-    assert_eq!(jobs.get(&id).unwrap()["report_truncated"], true);
+    let view = jobs.get(&id).unwrap();
+    assert_eq!(view["report"], report);
+    assert_eq!(view["report_truncated"], false);
     let printed = cli(state.path(), &["report", &id]);
     assert!(printed.status.success());
     assert_eq!(String::from_utf8(printed.stdout).unwrap(), report);

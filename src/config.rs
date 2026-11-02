@@ -36,7 +36,8 @@ pub struct Config {
     pub timeout: u64,
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
-    #[arg(long, default_value_t = 4000, value_parser = clap::value_parser!(u64).range(256..=6000))]
+    /// Deprecated compatibility option; ignored. Reports are returned in full.
+    #[arg(long, default_value_t = 4000)]
     pub report_chars: u64,
     #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u64).range(1..=365))]
     pub retention_days: u64,
@@ -148,10 +149,6 @@ impl Config {
             "log_bytes must be 4096–32000000"
         );
         ensure!((1..=7200).contains(&self.timeout), "timeout must be 1–7200");
-        ensure!(
-            (256..=6000).contains(&self.report_chars),
-            "report_chars must be 256–6000"
-        );
         ensure!(
             (1..=365).contains(&self.retention_days),
             "retention_days must be 1–365"

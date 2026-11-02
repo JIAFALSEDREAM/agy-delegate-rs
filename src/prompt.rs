@@ -11,18 +11,17 @@ use std::{
 const MAX_BYTES: usize = 65_536;
 const MAX_FILES: usize = 32;
 
-pub(crate) fn build(cwd: &Path, task: &str, report_chars: u64) -> Result<String> {
+pub(crate) fn build(cwd: &Path, task: &str) -> Result<String> {
     let home = directories::BaseDirs::new().context("Cannot find home directory")?;
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.home_dir().join(".codex"));
-    build_with_instructions(cwd, task, report_chars, home.home_dir(), &codex_home)
+    build_with_instructions(cwd, task, home.home_dir(), &codex_home)
 }
 
 fn build_with_instructions(
     cwd: &Path,
     task: &str,
-    report_chars: u64,
     home: &Path,
     codex_home: &Path,
 ) -> Result<String> {
@@ -72,7 +71,7 @@ Return: Conclusion, Essential evidence with precise file paths and line numbers,
 and Uncertainty or the smallest useful next check. Omit command transcripts and unrelated inventories.\n\
 State clearly if permissions or missing information prevent completion.\n\
 If the task asks to read instructions already loaded above, use the snapshot instead of searching again.\n\
-Keep the final report within {report_chars} characters. Task follows:\n\n{task}",
+Keep the final report concise while preserving essential evidence and uncertainty. Task follows:\n\n{task}",
         cwd.display(),
         if instructions.text.is_empty() {
             "(No instruction files found.)"
@@ -206,6 +205,27 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn report_guidance_preserves_evidence_without_a_character_budget() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("AGENTS.md"),
+            "Project rules mention characters.",
+        )
+        .unwrap();
+        let prompt =
+            build_with_instructions(root.path(), "inspect", root.path(), root.path()).unwrap();
+        assert!(prompt.contains("Project rules mention characters."));
+        let guidance = prompt.rsplit_once("</loaded_instructions>\n").unwrap().1;
+        let guidance = guidance.split_once("Task follows:\n\n").unwrap().0;
+        assert!(guidance.contains("Conclusion, Essential evidence"));
+        assert!(guidance.contains("Uncertainty or the smallest useful next check"));
+        assert!(guidance.contains(
+            "Keep the final report concise while preserving essential evidence and uncertainty."
+        ));
+        assert!(!guidance.contains("characters"));
+    }
+
+    #[test]
     fn preserves_fenced_indented_and_prose_references() {
         let root = tempfile::tempdir().unwrap();
         let literal = "```markdown\n@./missing.md\n````\n~~~\n@./missing.md\n~~~\n    @./missing.md\n \t@missing.md\n \t```text\n \t@missing.md\n \t```\n- ```text\n  @missing.md\n  ```\n<!--\n@missing.md\n-->\n@maintainers please review\n";
@@ -216,7 +236,7 @@ mod tests {
         )
         .unwrap();
         let prompt =
-            build_with_instructions(root.path(), "usage", 4000, root.path(), root.path()).unwrap();
+            build_with_instructions(root.path(), "usage", root.path(), root.path()).unwrap();
         assert!(prompt.contains(literal));
         assert!(prompt.contains("QUOTED_RULE"));
     }
@@ -235,7 +255,7 @@ mod tests {
         .unwrap();
         fs::write(cwd.parent().unwrap().join("AGENTS.md"), "PARENT_RULE").unwrap();
         fs::write(cwd.join("AGENTS.md"), "LOCAL_RULE").unwrap();
-        let prompt = build_with_instructions(&cwd, "usage", 4000, root.path(), &global).unwrap();
+        let prompt = build_with_instructions(&cwd, "usage", root.path(), &global).unwrap();
         assert!(prompt.find("PARENT_RULE").unwrap() < prompt.find("LOCAL_RULE").unwrap());
         assert_eq!(prompt.matches("LOCAL_RULE").count(), 1);
     }
@@ -255,8 +275,7 @@ mod tests {
         fs::write(cwd.join("AGENTS.md"), "SHADOWED_RULE").unwrap();
         fs::write(cwd.join("AGENTS.override.md"), "LOCAL_RULE").unwrap();
 
-        let prompt =
-            build_with_instructions(&cwd, "Explain usage", 4000, &home, &codex_home).unwrap();
+        let prompt = build_with_instructions(&cwd, "Explain usage", &home, &codex_home).unwrap();
         let mut previous = 0;
         for rule in [
             "COMMAND_RULE",
@@ -284,7 +303,7 @@ mod tests {
         fs::write(cwd.join("AGENTS.md"), "@./rules.md\nREPO_RULE").unwrap();
         fs::write(cwd.join("rules.md"), "@./AGENTS.md\nIMPORTED_RULE").unwrap();
         fs::write(cwd.join("child/AGENTS.md"), "NOT_YET_APPLICABLE").unwrap();
-        let prompt = build_with_instructions(&cwd, "usage", 4000, root.path(), &cwd).unwrap();
+        let prompt = build_with_instructions(&cwd, "usage", root.path(), &cwd).unwrap();
         assert_eq!(prompt.matches("REPO_RULE").count(), 1);
         assert_eq!(prompt.matches("IMPORTED_RULE").count(), 1);
         assert!(!prompt.contains("NOT_YET_APPLICABLE"));
@@ -302,7 +321,7 @@ mod tests {
             format!("@{}\n@~/rules.md", rules.display()),
         )
         .unwrap();
-        let prompt = build_with_instructions(&cwd, "usage", 4000, root.path(), &cwd).unwrap();
+        let prompt = build_with_instructions(&cwd, "usage", root.path(), &cwd).unwrap();
         assert_eq!(prompt.matches("COMMAND_RULE").count(), 1);
     }
 
@@ -311,8 +330,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let agents = root.path().join("AGENTS.md");
         fs::write(&agents, "@missing.md").unwrap();
-        let build =
-            || build_with_instructions(root.path(), "usage", 4000, root.path(), root.path());
+        let build = || build_with_instructions(root.path(), "usage", root.path(), root.path());
         assert!(build().unwrap_err().to_string().contains("missing.md"));
         fs::write(&agents, "@directory").unwrap();
         fs::create_dir(root.path().join("directory")).unwrap();
@@ -337,8 +355,8 @@ mod tests {
             })
             .collect::<String>();
         fs::write(root.path().join("AGENTS.md"), imports).unwrap();
-        let error = build_with_instructions(root.path(), "usage", 4000, root.path(), root.path())
-            .unwrap_err();
+        let error =
+            build_with_instructions(root.path(), "usage", root.path(), root.path()).unwrap_err();
         assert!(error.to_string().contains("exceed 32 files"));
     }
 }
