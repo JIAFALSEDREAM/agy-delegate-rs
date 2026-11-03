@@ -25,15 +25,15 @@ jobs:
     outputs:
       version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - name: Validate tag, versions and main branch
         id: tag
         env:
@@ -74,20 +74,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
           toolchain: '1.88.0'
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -135,7 +135,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
         run: python scripts/release.py archive --target "$TARGET" --version "$VERSION" --output "dist/$TARGET"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: dist/${{ matrix.target }}/
@@ -148,14 +148,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '24'
-      - uses: actions/download-artifact@v4
+          node-version: '26'
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Assemble npm package and checksums
@@ -178,7 +178,7 @@ jobs:
           fi
           gh release upload "$RELEASE_TAG" dist/assets/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-package
           path: dist/assets/*.tgz
@@ -192,12 +192,12 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - run: npm install -g npm@11
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-package
           path: dist
@@ -215,8 +215,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
