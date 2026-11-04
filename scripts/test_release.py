@@ -27,6 +27,11 @@ class ReleaseTests(unittest.TestCase):
         (self.root / "Cargo.toml").write_text(
             '[package]\nname = "agy-delegate-rs"\nversion = "0.1.0"\nrepository = "https://github.com/example/agy-delegate-rs"\n'
         )
+        (self.root / "Cargo.lock").write_text(
+            'version = 4\n\n[[package]]\nname = "agy-delegate-rs"\nversion = "0.1.0"\n'
+            '\n[[package]]\nname = "dependency"\nversion = "0.1.0"\nsource = "registry+https://example.invalid/index"\n'
+        )
+        (self.root / ".gitignore").write_text("/target/\n/artifacts/\n/dist/\n")
         self.manifest = {
             "name": "agy-delegate-rs", "version": "0.1.0",
             "repository": {"url": "git+https://github.com/example/agy-delegate-rs.git"},
@@ -54,6 +59,64 @@ class ReleaseTests(unittest.TestCase):
     def test_annotated_tag_on_main_is_valid(self):
         self.git("tag", "-a", "v0.1.0", "-m", "release")
         self.validate()
+
+    def test_tag_drives_all_versions_without_a_version_commit(self):
+        cargo = self.root / "Cargo.toml"
+        cargo.write_text(cargo.read_text() + '\n[package.metadata]\nversion = "9.9.9"\n')
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-m", "package metadata fixture")
+        self.git("tag", "-a", "v1.2.3", "-m", "release")
+        head = self.git("rev-parse", "HEAD")
+        release.prepare("v1.2.3")
+        self.validate("v1.2.3")
+        manifest = release.tomllib.loads(cargo.read_text())
+        self.assertEqual(manifest["package"]["version"], "1.2.3")
+        self.assertEqual(manifest["package"]["metadata"]["version"], "9.9.9")
+        packages = release.tomllib.loads((self.root / "Cargo.lock").read_text())["package"]
+        self.assertEqual([(p["name"], p["version"]) for p in packages],
+                         [("agy-delegate-rs", "1.2.3"), ("dependency", "0.1.0")])
+        npm = json.loads((self.root / "npm/package.json").read_text())
+        expected = self.manifest | {"version": "1.2.3", "optionalDependencies": release.platform_dependencies("1.2.3")}
+        self.assertEqual(npm, expected)
+        self.assertEqual(set(self.git("diff", "--name-only").splitlines()), set(release.VERSION_FILES))
+        before = {name: (self.root / name).read_bytes() for name in release.VERSION_FILES}
+        release.prepare("v1.2.3")
+        self.assertEqual(before, {name: (self.root / name).read_bytes() for name in release.VERSION_FILES})
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertIn('version = "0.1.0"', self.git("show", "HEAD:Cargo.toml"))
+
+    def test_prepare_rejects_invalid_tags_without_changing_files(self):
+        files = ("Cargo.toml", "Cargo.lock", "npm/package.json")
+        before = {name: (self.root / name).read_bytes() for name in files}
+        for tag in ("0.2.0", "v0.2", "v00.2.0", "v0.2.0-rc.1", "v0.2.0+build"):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                release.prepare(tag)
+            self.assertEqual(before, {name: (self.root / name).read_bytes() for name in files})
+
+    def test_prepare_and_crate_publishing_reject_unrelated_changes(self):
+        uploader = Path(__file__).with_name("publish-crate.py")
+        for name in ("README.md", "unexpected-source"):
+            path = self.root / name
+            original = path.read_bytes() if path.exists() else None
+            path.write_text("unrelated change")
+            with self.subTest(path=name), self.assertRaisesRegex(ValueError, "unrelated"):
+                release.prepare("v0.2.0")
+            with patch("subprocess.run", wraps=subprocess.run) as run:
+                with self.assertRaisesRegex(ValueError, "unrelated"):
+                    runpy.run_path(str(uploader))
+                self.assertFalse(any(call.args[0][0] == "cargo" for call in run.call_args_list))
+            if original is None:
+                path.unlink()
+            else:
+                path.write_bytes(original)
+
+    def test_prepare_rejects_missing_root_lock_entry_without_partial_updates(self):
+        lock = self.root / "Cargo.lock"
+        lock.write_text('version = 4\n\n[[package]]\nname = "other"\nversion = "0.1.0"\n')
+        before = {name: (self.root / name).read_bytes() for name in ("Cargo.toml", "Cargo.lock", "npm/package.json")}
+        with self.assertRaises(ValueError):
+            release.prepare("v0.2.0")
+        self.assertEqual(before, {name: (self.root / name).read_bytes() for name in before})
 
     def test_main_history_is_valid_even_after_branch_advances(self):
         self.git("tag", "v0.1.0")
@@ -97,7 +160,7 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "platform dependencies"):
             release.assemble(self.make_artifacts(), self.root / "dist", "example/agy-delegate-rs")
 
-    def make_artifacts(self):
+    def make_artifacts(self, version="0.1.0"):
         artifacts = self.root / "artifacts"
         for target, platform in release.TARGETS.items():
             name = "agy-delegate-rs.exe" if platform.startswith("win32") else "agy-delegate-rs"
@@ -105,8 +168,21 @@ class ReleaseTests(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             binary.write_bytes(f"binary:{platform}".encode())
             binary.chmod(0o755)
-            release.archive(target, "0.1.0", artifacts / target)
+            release.archive(target, version, artifacts / target)
         return artifacts
+
+    def test_tag_derived_version_reaches_all_npm_archives(self):
+        self.git("tag", "v1.2.3")
+        release.prepare("v1.2.3")
+        self.validate("v1.2.3")
+        output = self.root / "dist"
+        release.assemble(self.make_artifacts("1.2.3"), output, "example/agy-delegate-rs")
+        for name in ("agy-delegate-rs", *release.platform_dependencies("1.2.3")):
+            with self.subTest(package=name), tarfile.open(output / "assets" / f"{name}-1.2.3.tgz") as bundle:
+                manifest = json.load(bundle.extractfile("package/package.json"))
+                self.assertEqual(manifest["version"], "1.2.3")
+                if name == "agy-delegate-rs":
+                    self.assertEqual(manifest["optionalDependencies"], release.platform_dependencies("1.2.3"))
 
     def test_missing_matrix_member_prevents_packaging(self):
         artifacts = self.make_artifacts()
@@ -205,7 +281,8 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "npm payload differs"):
             release.reuse_assets(published, assets)
 
-    def test_crate_publication_checks_existing_and_ambiguous_uploads(self):
+    @patch.object(release, "check_version_changes")
+    def test_crate_publication_checks_existing_and_ambiguous_uploads(self, check_changes):
         archive = self.root / "target/package/agy-delegate-rs-0.1.0.crate"
         archive.parent.mkdir(parents=True)
         archive.write_bytes(b"crate fixture")
@@ -219,6 +296,7 @@ class ReleaseTests(unittest.TestCase):
                 run.return_value.returncode = status
                 runpy.run_path(str(uploader))
                 self.assertEqual(any(call.args[0][1] == "publish" for call in run.call_args_list), should_publish)
+                self.assertTrue(all("--allow-dirty" in call.args[0] for call in run.call_args_list))
         mismatch = io.BytesIO(b'{"version":{"checksum":"different"}}')
         with patch("subprocess.run") as run, patch("urllib.request.urlopen", return_value=mismatch):
             with self.assertRaises(ValueError):

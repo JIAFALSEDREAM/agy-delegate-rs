@@ -22,6 +22,7 @@ TARGETS = {
     "x86_64-pc-windows-msvc": "win32-x64",
     "aarch64-pc-windows-msvc": "win32-arm64",
 }
+VERSION_FILES = ("Cargo.toml", "Cargo.lock", "npm/package.json")
 
 
 def command(*args, cwd=None):
@@ -43,14 +44,73 @@ def validate_dependencies(manifest):
         raise ValueError("npm platform dependencies must cover the complete matrix at the entry package version")
 
 
-def validate(tag, main_ref, repository):
+def release_version(tag):
     if not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag):
         raise ValueError("release tags must be stable versions: vMAJOR.MINOR.PATCH")
-    version = tag[1:]
+    return tag[1:]
+
+
+def check_version_changes():
+    changed = command("git", "diff", "--name-only", "HEAD").splitlines()
+    untracked = command("git", "ls-files", "--others", "--exclude-standard").splitlines()
+    unexpected = set(changed + untracked) - set(VERSION_FILES)
+    if unexpected:
+        raise ValueError(f"release checkout contains unrelated changes: {sorted(unexpected)}")
+
+
+def with_package_version(text, name, version, lock=False):
+    heading = r"\[\[package\]\]" if lock else r"\[package\]"
+    sections = re.finditer(rf"(?ms)^{heading}[^\n]*\n.*?(?=^\[|\Z)", text)
+    matches = []
+    for section in sections:
+        package = tomllib.loads(section.group())["package"]
+        if lock:
+            package = package[0]
+        if package.get("name") == name and (not lock or "source" not in package):
+            matches.append(section)
+    if len(matches) != 1:
+        raise ValueError(f"expected exactly one root package section for {name}")
+    section = matches[0]
+    updated, count = re.subn(
+        r'''(?m)^([ \t]*version[ \t]*=[ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*')''',
+        lambda match: f'{match[1]}"{version}"', section.group(),
+    )
+    if count != 1:
+        raise ValueError(f"expected exactly one package version for {name}")
+    return text[:section.start()] + updated + text[section.end():]
+
+
+def prepare(tag):
+    version = release_version(tag)
+    check_version_changes()
+    cargo_text = (ROOT / "Cargo.toml").read_text()
+    name = tomllib.loads(cargo_text)["package"]["name"]
+    npm = json.loads((ROOT / "npm/package.json").read_text())
+    dependencies = platform_dependencies(version)
+    if set(npm.get("optionalDependencies", {})) != set(dependencies):
+        raise ValueError("npm platform dependencies must cover the complete matrix")
+    npm["version"] = version
+    npm["optionalDependencies"] = dependencies
+    # Prepare all content before writing, retaining dependency versions and TOML comments.
+    contents = (
+        with_package_version(cargo_text, name, version),
+        with_package_version((ROOT / "Cargo.lock").read_text(), name, version, lock=True),
+        json.dumps(npm, indent=2) + "\n",
+    )
+    for path, content in zip(VERSION_FILES, contents):
+        (ROOT / path).write_text(content, encoding="utf-8")
+    print(f"Prepared release version {version} from {tag}; no commit created")
+
+
+def validate(tag, main_ref, repository):
+    version = release_version(tag)
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]
     npm = json.loads((ROOT / "npm/package.json").read_text())
-    if cargo["version"] != version or npm["version"] != version:
-        raise ValueError("tag, Cargo.toml and npm/package.json versions must match")
+    packages = tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
+    roots = [p for p in packages if p["name"] == cargo["name"] and "source" not in p]
+    if (cargo["version"] != version or npm["version"] != version
+            or len(roots) != 1 or roots[0]["version"] != version):
+        raise ValueError("tag, Cargo.toml, Cargo.lock and npm/package.json versions must match")
     validate_dependencies(npm)
     commit = command("git", "rev-parse", f"refs/tags/{tag}^{{commit}}")
     if commit != command("git", "rev-parse", "HEAD"):
@@ -161,6 +221,8 @@ def reuse_assets(published, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
+    inject = commands.add_parser("prepare")
+    inject.add_argument("--tag", required=True)
     check = commands.add_parser("validate")
     check.add_argument("--tag", required=True)
     check.add_argument("--main-ref", required=True)
@@ -177,7 +239,9 @@ def main():
     reuse.add_argument("--published", type=Path, required=True)
     reuse.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.action == "validate":
+    if args.action == "prepare":
+        prepare(args.tag)
+    elif args.action == "validate":
         validate(args.tag, args.main_ref, args.repository)
     elif args.action == "archive":
         archive(args.target, args.version, args.output)

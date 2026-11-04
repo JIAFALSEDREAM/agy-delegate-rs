@@ -185,7 +185,7 @@ Uninstall cancels tasks in the selected `state_dir`, including CLI tasks, even i
 
 ## Maintainer releases
 
-`.github/workflows/release.yml` runs only on pushed `v*.*.*` tags, further restricted to stable `vMAJOR.MINOR.PATCH` versions. The tagged commit must be in the repository's default branch history, and tag, Cargo, and npm versions must match. Otherwise publication stops.
+`.github/workflows/release.yml` runs only on pushed `v*.*.*` tags, further restricted to stable `vMAJOR.MINOR.PATCH` versions. The tag supplies the published version, and its commit must be in the repository's default branch history. Otherwise publication stops.
 
 One-time setup:
 
@@ -200,15 +200,15 @@ With npm 11.15+, you can configure trusted publishing after initial publication 
 npm trust github agy-delegate-rs --repo JIAFALSEDREAM/agy-delegate-rs --file release.yml --allow-publish --yes
 ```
 
-Repeat for each platform package. Cargo/npm repository metadata must match the actual Actions repository. Releases use tagged source, and crate packaging requires a clean working tree. Uncommitted local verification documents are excluded.
+Repeat for each platform package. Cargo/npm repository metadata must match the actual Actions repository. Every release job runs `python scripts/release.py prepare --tag "$RELEASE_TAG"` in its own tagged checkout. This updates the root package version in `Cargo.toml` and `Cargo.lock`, plus the npm entry version and its six platform dependencies. Locked dependency versions stay unchanged. No Git commit is created or pushed. Crate packaging and publishing allow these generated version-file changes; preparation and publication reject unrelated modified or untracked files.
 
-For each release, update `Cargo.toml`, the entry npm package version and its six `optionalDependencies`, and this package's version in `Cargo.lock`. CI generates platform package metadata with the same version. Commit to the default branch, then create and push the tag. For example, when all versions are `0.1.3`:
+For each release, commit and push code/documentation changes to the default branch, then create and push a new tag. No advance version edits or dedicated version commit are required. CI generates platform package metadata with the same version. For example, to release `0.2.1` next:
 
 ```sh
-git tag -a v0.1.3 -m 'Release v0.1.3'
-git push origin v0.1.3
+git tag -a v0.2.1 -m 'Release v0.2.1'
+git push origin v0.2.1
 ```
 
-The workflow validates the release, builds and tests all six native platforms, checks their sandboxes, and produces six binary archives, seven npm packages, and SHA-256 checksums. After all builds succeed, it publishes GitHub Releases, then npm and crates.io. The npm job publishes/verifies all platform packages before the entry package. CI does not call models; cross-platform authentication still requires verification on actual machines.
+The workflow injects and validates versions, builds and tests all six native platforms, checks their sandboxes, and produces six binary archives, seven npm packages, and SHA-256 checksums. After all builds succeed, it publishes GitHub Releases, then npm and crates.io. The npm job publishes/verifies all platform packages before the entry package. Committed version files are not updated by releases; direct source builds continue to use their committed version. CI does not call models; cross-platform authentication still requires verification on actual machines.
 
 Publication across the three channels is not atomic. Rerun failed jobs in Actions. If a version already exists on npm or crates.io, its integrity checksum must match before skipping it; different contents are rejected. Public GitHub Release assets are verified and reused. Only draft assets may be replaced. After manually bootstrapping npm packages, rerun the same job to reuse the original archives. Do not delete a published tag and republish different contents; fix the issue and release a new version.

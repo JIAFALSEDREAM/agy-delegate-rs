@@ -9,7 +9,9 @@ import urllib.request
 import release
 
 package = release.tomllib.loads((release.ROOT / "Cargo.toml").read_text())["package"]
-subprocess.run(["cargo", "package", "--locked"], check=True)
+release.check_version_changes()
+# CI derives versions from the tag without committing the generated manifests.
+subprocess.run(["cargo", "package", "--locked", "--allow-dirty"], check=True)
 archive = release.ROOT / "target/package" / f'{package["name"]}-{package["version"]}.crate'
 checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
 url = f'https://crates.io/api/v1/crates/{package["name"]}/{package["version"]}'
@@ -37,7 +39,7 @@ def existing():
 
 
 if not existing():
-    result = subprocess.run(["cargo", "publish", "--locked", "--no-verify"])
+    result = subprocess.run(["cargo", "publish", "--locked", "--allow-dirty", "--no-verify"])
     if result.returncode:
         for attempt in range(3):
             time.sleep(2 ** attempt)

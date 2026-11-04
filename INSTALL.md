@@ -174,7 +174,7 @@ Unix worker 与沙箱组长均已退出、但仍有子进程存活且身份无�
 
 ## 维护者发版
 
-`.github/workflows/release.yml` 仅由推送 `v*.*.*` tag 触发，进一步限制为稳定版本 `vMAJOR.MINOR.PATCH`。tag 指向的提交必须在仓库默认主分支历史中，且 tag、`Cargo.toml` 和 `npm/package.json` 版本一致；不符合时终止，不发布。
+`.github/workflows/release.yml` 仅由推送 `v*.*.*` tag 触发，进一步限制为稳定版本 `vMAJOR.MINOR.PATCH`。tag 是正式发布版本的来源，指向的提交必须在仓库默认主分支历史中；不符合时终止，不发布。
 
 首次发版前完成一次性设置：
 
@@ -189,15 +189,15 @@ npm 11.15+ 也可在首次发布后通过 CLI 配置可信发布（按提示在�
 npm trust github agy-delegate-rs --repo JIAFALSEDREAM/agy-delegate-rs --file release.yml --allow-publish --yes
 ```
 
-Cargo/npm 元数据中的仓库地址必须与 Actions 的实际仓库一致，发版前会核对。版本与源代码保持 tag 内容，crate 打包要求工作区干净。本地未提交的验收文档不会进入 crate 或 npm 包。
+Cargo/npm 元数据中的仓库地址必须与 Actions 的实际仓库一致，发版前会核对。每个发版任务会在独立的 tag 检出目录运行 `python scripts/release.py prepare --tag "$RELEASE_TAG"`，自动更新 `Cargo.toml`、`Cargo.lock` 中的本包版本，以及 `npm/package.json` 的入口和六个平台依赖版本。依赖锁定版本保持不变，不生成或回写 Git 提交。crate 打包和发布允许这些临时版本文件修改；准备和发布脚本会拒绝其他未提交或未跟踪的文件改动。
 
-每次发版修改 Cargo/npm 两处版本、入口包 `optionalDependencies` 中的六个平台依赖版本，并更新 `Cargo.lock` 中的本包版本。六个平台包的元数据由 CI 自动生成，无需分别维护。提交到主分支后打 tag 并推送，例如版本均为 `0.1.3` 时：
+每次发版只需先将代码、文档等改动提交并推送到主分支，再创建并推送新 tag；无需提前修改版本号或创建专门的版本提交。六个平台包的元数据由 CI 自动生成。比如下次发布 `0.2.1`：
 
 ```sh
-git tag -a v0.1.3 -m 'Release v0.1.3'
-git push origin v0.1.3
+git tag -a v0.2.1 -m 'Release v0.2.1'
+git push origin v0.2.1
 ```
 
-流程先验证，并在 Linux、macOS、Windows 的 x86_64 与 ARM64 六种原生环境构建、执行测试与原生沙箱检查，生成六个二进制压缩包、七个 npm 安装包和 SHA-256 清单；全部构建通过后发布 GitHub Release，再分别发布 npm 和 crate。六个平台包由脚本自动生成、统一版本，npm job 先逐一发布并验证平台包，全部成功后才发布入口包；CI 负责维护，无需手工编辑七套元数据。跨平台的模型认证仍需实机验收，CI 不会调用模型。
+流程先注入并校验版本，再在 Linux、macOS、Windows 的 x86_64 与 ARM64 六种原生环境构建、执行测试与原生沙箱检查，生成六个二进制压缩包、七个 npm 安装包和 SHA-256 清单；全部构建通过后发布 GitHub Release，再分别发布 npm 和 crate。六个平台包由脚本自动生成、统一版本，npm job 先逐一发布并验证平台包，全部成功后才发布入口包；CI 负责维护，无需手工编辑七套元数据。仓库内的版本文件不会随发版回写，直接从源码构建仍使用其已提交版本。跨平台的模型认证仍需实机验收，CI 不会调用模型。
 
 三个渠道不是原子事务。部分渠道失败时，在 Actions 重跑失败的 job；npm 和 crate 若已有相同版本，会比较现有包的完整性摘要，相同才跳过，不会覆盖不同内容。已公开的 GitHub Release 会校验并复用原资产，npm 内容不匹配时拒绝继续；只允许替换尚未公开的草稿资产。首次 npm 手动发布后也应重跑同一 job，以复用原安装包。不要删除已发布版本的 tag 后重复发不同内容；修复并提升版本再发。
