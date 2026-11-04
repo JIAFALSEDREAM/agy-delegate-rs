@@ -1147,7 +1147,13 @@ impl Jobs {
                             .unwrap_or("step")
                             .into();
                     }
-                    updates.send_replace(job.clone());
+                    updates.send_if_modified(|snapshot| {
+                        if *snapshot == job {
+                            return false;
+                        }
+                        snapshot.clone_from(&job);
+                        true
+                    });
                     if started {
                         while !*ownership.borrow_and_update() {
                             ownership
