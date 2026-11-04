@@ -175,6 +175,8 @@ First run `agy-delegate-rs uninstall` to stop and verify tasks in the selected s
 
 Application log sizes are checked every 100 milliseconds. Exceeding the limit terminates the task; retained logs are truncated and redacted afterward. Managed conversation file sizes are checked before startup, roughly every 2 seconds during execution, and after termination. Exceeding `profile_bytes` terminates the entire sandbox process group. Scans do not follow symbolic links and fail tasks if a safe scan is impossible. Cancellation, timeout, and existing execution failures retain their original status/diagnostics, with final scan errors added separately.
 
+Each conversation scan has a 2-second deadline. Only a scan's own deadline triggers one complete retry with fresh counters. Persistent timeouts, read errors, links, and special files still fail the task.
+
 Monitoring is not a filesystem quota; limits can be exceeded between checks. `profile_bytes` covers managed conversation directories, not shared agy account directories or total disk usage across other tasks.
 
 If the operating system cannot confirm termination of the entire sandbox process group within the deadline, the task fails. A `tmp/UNVERIFIED_PROCESS` marker indicates that original logs remain in the private directory and must not be considered redacted. Stop and verify related processes before handling logs or cleanup. Uninstall rejects task directories it cannot verify.

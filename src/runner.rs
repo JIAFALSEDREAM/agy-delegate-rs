@@ -470,7 +470,7 @@ pub(crate) async fn run_with_stop(
             json!({"status":"cancelled","error":initial_scan.err().map(|error| format!("Initial conversation check: {error:#}"))}),
         );
     }
-    initial_scan?;
+    initial_scan.context("Initial conversation check")?;
     let mut cmd = config.sandbox_profile(
         &cwd,
         &tmp,
@@ -665,7 +665,10 @@ pub(crate) async fn run_with_stop(
                 let scanned = profile_scan.as_mut().unwrap().await;
                 profile_scan.take();
                 ensure!(
-                    scanned.context("Conversation size scan panicked")?? <= limit,
+                    scanned
+                        .context("Conversation size scan panicked")?
+                        .context("Periodic conversation check")?
+                        <= limit,
                     "Conversation directory exceeded configured profile_bytes limit"
                 );
             }
@@ -745,7 +748,9 @@ pub(crate) async fn run_with_stop(
             return Err(primary.context(format!("Final conversation check: {scan:#}")));
         }
         (Err(error), _) => return Err(error),
-        (Ok(value), Err(scan)) if value["status"] == "succeeded" => return Err(scan),
+        (Ok(value), Err(scan)) if value["status"] == "succeeded" => {
+            return Err(scan.context("Final conversation check"));
+        }
         (Ok(mut value), Err(scan)) => {
             let original = value["error"].as_str().unwrap_or_default();
             value["error"] = format!("{original}; Final conversation check: {scan:#}")

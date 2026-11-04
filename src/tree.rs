@@ -8,15 +8,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn reopen(root: &Dir, path: &Path, deadline: Option<Instant>) -> io::Result<Dir> {
+#[derive(Debug)]
+struct ScanDeadline;
+
+impl std::fmt::Display for ScanDeadline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Managed storage scan exceeded its deadline")
+    }
+}
+
+impl std::error::Error for ScanDeadline {}
+
+fn reopen(
+    root: &Dir,
+    path: &Path,
+    mut check_deadline: impl FnMut() -> io::Result<()>,
+) -> io::Result<Dir> {
     let mut directory = root.try_clone()?;
     for component in path.components() {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Managed storage scan exceeded its deadline",
-            ));
-        }
+        check_deadline()?;
         directory = directory.open_dir_nofollow(component)?;
     }
     Ok(directory)
@@ -24,26 +34,46 @@ fn reopen(root: &Dir, path: &Path, deadline: Option<Instant>) -> io::Result<Dir>
 
 /// Sum regular-file lengths without following links; stop early above the limit.
 /// File removals during scanning are harmless; unsafe entries fail closed.
+/// Retry one scan deadline with fresh counters and the same per-scan bounds.
 pub(crate) fn usage(root: &Dir, limit: u64) -> Result<u64> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    usage_with_clock(root, limit, &mut Instant::now)
+}
+
+fn usage_with_clock(root: &Dir, limit: u64, now: &mut impl FnMut() -> Instant) -> Result<u64> {
+    match scan_usage(root, limit, now) {
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .and_then(io::Error::get_ref)
+                .is_some_and(|source| source.is::<ScanDeadline>()) =>
+        {
+            scan_usage(root, limit, now)
+        }
+        result => result,
+    }
+}
+
+fn scan_usage(root: &Dir, limit: u64, now: &mut impl FnMut() -> Instant) -> Result<u64> {
+    let deadline = now() + Duration::from_secs(2);
+    let mut check_deadline = || {
+        if now() >= deadline {
+            Err(io::Error::new(io::ErrorKind::TimedOut, ScanDeadline))
+        } else {
+            Ok(())
+        }
+    };
     let mut pending = vec![PathBuf::new()];
     let mut bytes = 0_u64;
     let mut entries = 0_u64;
     while let Some(path) = pending.pop() {
-        ensure!(
-            Instant::now() < deadline,
-            "Managed storage scan exceeded its deadline"
-        );
-        let directory = match reopen(root, &path, Some(deadline)) {
+        check_deadline()?;
+        let directory = match reopen(root, &path, &mut check_deadline) {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
         for entry in directory.entries()? {
-            ensure!(
-                Instant::now() < deadline,
-                "Managed storage scan exceeded its deadline"
-            );
+            check_deadline()?;
             entries += 1;
             ensure!(
                 entries <= 100_000,
@@ -69,19 +99,13 @@ pub(crate) fn usage(root: &Dir, limit: u64) -> Result<u64> {
                 );
                 bytes = bytes.saturating_add(metadata.len());
                 if bytes > limit {
-                    ensure!(
-                        Instant::now() < deadline,
-                        "Managed storage scan exceeded its deadline"
-                    );
+                    check_deadline()?;
                     return Ok(bytes);
                 }
             }
         }
     }
-    ensure!(
-        Instant::now() < deadline,
-        "Managed storage scan exceeded its deadline"
-    );
+    check_deadline()?;
     Ok(bytes)
 }
 
@@ -93,7 +117,7 @@ pub(crate) fn remove(root: Dir) -> io::Result<()> {
         if visited && path.as_os_str().is_empty() {
             continue;
         }
-        let directory = reopen(&root, &path, None)?;
+        let directory = reopen(&root, &path, || Ok(()))?;
         if visited {
             directory.remove_open_dir()?;
         } else {
@@ -116,6 +140,130 @@ pub(crate) fn remove(root: Dir) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn transient_deadline_restarts_and_counts_the_complete_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("nested")).unwrap();
+        fs::write(temp.path().join("one"), b"1234").unwrap();
+        fs::write(temp.path().join("nested/two"), b"56789").unwrap();
+        let root = Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+        let start = Instant::now();
+        // Expire during root entries, component reopening, and the final check.
+        for jump_at in [4, 6, 8] {
+            let mut ticks = 0;
+            let result = usage_with_clock(&root, u64::MAX, &mut || {
+                ticks += 1;
+                start + Duration::from_secs(if ticks >= jump_at { 3 } else { 0 })
+            });
+            assert_eq!(result.unwrap(), 9, "jump at clock read {jump_at}");
+        }
+    }
+
+    #[test]
+    fn persistent_deadlines_fail_after_two_scans() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("one"), b"1234").unwrap();
+        let root = Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+        let start = Instant::now();
+        let mut ticks = 0;
+        let error = usage_with_clock(&root, u64::MAX, &mut || {
+            assert!(ticks < 4, "deadline retry must be bounded");
+            let time = start + Duration::from_secs(ticks * 3);
+            ticks += 1;
+            time
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Managed storage scan exceeded its deadline"
+        );
+        assert_eq!(ticks, 4);
+    }
+
+    #[test]
+    fn rescan_counts_new_files_and_stops_above_quota() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("one"), b"1234").unwrap();
+        fs::write(temp.path().join("two"), b"5678").unwrap();
+        let root = Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+        let start = Instant::now();
+        let mut ticks = 0;
+        let result = usage_with_clock(&root, 16, &mut || {
+            ticks += 1;
+            if ticks == 4 {
+                fs::write(temp.path().join("late"), b"123456789").unwrap();
+            }
+            start + Duration::from_secs(if ticks >= 4 { 3 } else { 0 })
+        });
+        assert_eq!(result.unwrap(), 17);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_entries_fail_immediately_or_when_added_for_rescan() {
+        use std::os::unix::ffi::OsStrExt;
+
+        for (retry, link) in [(false, true), (true, true), (true, false)] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(temp.path().join("one"), b"1234").unwrap();
+            fs::write(temp.path().join("two"), b"5678").unwrap();
+            let root = Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+            let add_link =
+                || std::os::unix::fs::symlink("one", temp.path().join("unsafe")).unwrap();
+            if !retry {
+                add_link();
+            }
+            let start = Instant::now();
+            let mut ticks = 0;
+            let error = usage_with_clock(&root, u64::MAX, &mut || {
+                ticks += 1;
+                assert!(
+                    ticks <= if retry { 10 } else { 5 },
+                    "unsafe entries must not retry"
+                );
+                if retry && ticks == 4 {
+                    if link {
+                        add_link();
+                    } else {
+                        let path = temp.path().join("unsafe");
+                        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                    }
+                }
+                start + Duration::from_secs(if retry && ticks >= 4 { 3 } else { 0 })
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Managed storage contains a link or special file"
+            );
+        }
+    }
+
+    #[test]
+    fn reopening_io_errors_do_not_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let root = Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+        let start = Instant::now();
+        let mut ticks = 0;
+        let error = usage_with_clock(&root, u64::MAX, &mut || {
+            ticks += 1;
+            assert!(ticks <= 5, "I/O errors must not retry");
+            if ticks == 4 {
+                fs::remove_dir(&nested).unwrap();
+                fs::write(&nested, b"replaced").unwrap();
+            }
+            start
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::NotADirectory
+        );
+    }
 
     #[test]
     fn nested_files_count_together_and_stop_above_the_budget() {
