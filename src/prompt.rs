@@ -57,21 +57,47 @@ When entering a new subdirectory, check only the exact local filenames AGENTS.ov
 AGENTS.md, preferring the override. Do not recursively search for instruction files.\n\
 Stay within the supplied investigation. Read named task files directly unless already loaded above.\n\
 Read outside the starting directory only for a concrete dependency needed to answer the task;\n\
-do not search for parent instructions. Batch independent checks into as few tool calls as possible.\n\
-Combine independent file reads and checks in one run_command shell batch instead of a separate\n\
-read_file call per file. Reserve separate reads for follow-ups that depend on earlier results.\n\
-Avoid repeating successful directory listings. If a required shell wrapper filters filenames,\n\
-use its unfiltered/proxy mode for discovery so hidden files and empty results remain unambiguous.\n\
+do not search for parent instructions. Use this investigation workflow:\n\
+1. Discover: use one run_command batch to identify relevant paths and, if requested, recent commits.\n\
+2. Verify: use one run_command batch to search/read all known candidate files and requested history.\n\
+3. Fill gaps: make additional calls only for a specific unanswered part of the task. Stop when covered.\n\
+Before every call, collect ALL currently known independent checks into that batch. Different files,\n\
+languages, search spellings, and nearby line ranges are not separate dependent steps. Do not make\n\
+one tool call per file or search term. Do not spend a call merely listing a directory when you can\n\
+search its relevant files in the same batch. Use read_file only for a single targeted gap that\n\
+cannot be resolved with the other pending checks; use run_command for independent reads.\n\
+For example, to check configuration comments for a tool link, discover paths and recent commits\n\
+together, then search the config definitions, both language files, existing generated configs,\n\
+and relevant history together. Do not alternate model turns with each file or language.\n\
+Keep batch results distinguishable by file or check. An expected no-match exit must not skip the\n\
+remaining checks: use newline-separated commands for independent checks, never an && chain.\n\
+Reserve && for commands that truly depend on each other's success. A grep/rg exit code of 1\n\
+means no matches, not an investigation failure; a missing file or other real error is a coverage\n\
+gap, not evidence of absence. Prefer one rg -n search with alternative terms and multiple paths\n\
+over separate calls per term. Aim for three to five tool round trips for a simple bounded investigation.\n\
+Before exceeding five, identify the exact missing evidence; do not broaden a completed inquiry\n\
+or reread files merely to reconfirm it. The target must not prevent obtaining required evidence.\n\
+For presence/absence questions, search the relevant source, comments, and localization together\n\
+when their paths are known. Limit Git history to relevant paths and the requested range.\n\
+Reuse successful listings, searches, and file reads. Read a file again only for missing context\n\
+or precise evidence, targeting the needed lines rather than overlapping large ranges.\n\
+When a required shell wrapper summarizes output, use its unfiltered/proxy mode from the FIRST\n\
+batch for filename discovery, precise line evidence, and absence checks. Do not try filtered output\n\
+first and then repeat the same search to recover omitted results.\n\
 For usage questions, start with the README and give the documented quick start; inspect source\n\
 or local tool versions only if needed to resolve a specific gap or explicitly requested. Once the\n\
 documented startup steps are found, report them without tracing their implementation to reconfirm.\n\
-Aim for at most four tool round trips for a basic usage question. Skip unrelated Git metadata,\n\
-skills, and configuration. Stop as soon as the requested answer has sufficient evidence.\n\
+Skip unrelated Git metadata, skills, and configuration. Stop as soon as the requested answer has\n\
+sufficient evidence; for an absence claim, state the checked scope and any coverage gaps.\n\
 Return: Conclusion, Essential evidence with precise file paths and line numbers,\n\
 and Uncertainty or the smallest useful next check. Omit command transcripts and unrelated inventories.\n\
 State clearly if permissions or missing information prevent completion.\n\
 If the task asks to read instructions already loaded above, use the snapshot instead of searching again.\n\
-Keep the final report concise while preserving essential evidence and uncertainty. Task follows:\n\n{task}",
+Keep the final report concise while preserving essential evidence and uncertainty. For the initial\n\
+report, default to a short conclusion and at most three evidence bullets; for Chinese, aim for\n\
+about 500 characters. This is a soft target, not a limit; preserve necessary evidence and follow\n\
+any task request for more detail. Cite each key source once; avoid repeating long paths, task\n\
+summaries, or code excerpts when a precise citation already supplies the evidence. Task follows:\n\n{task}",
         cwd.display(),
         if instructions.text.is_empty() {
             "(No instruction files found.)"
@@ -205,7 +231,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn report_guidance_preserves_evidence_without_a_character_budget() {
+    fn report_guidance_preserves_evidence_with_a_soft_length_target() {
         let root = tempfile::tempdir().unwrap();
         fs::write(
             root.path().join("AGENTS.md"),
@@ -222,7 +248,8 @@ mod tests {
         assert!(guidance.contains(
             "Keep the final report concise while preserving essential evidence and uncertainty."
         ));
-        assert!(!guidance.contains("characters"));
+        assert!(guidance.contains("about 500 characters. This is a soft target, not a limit"));
+        assert!(guidance.contains("any task request for more detail"));
     }
 
     #[test]

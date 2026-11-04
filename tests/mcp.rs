@@ -137,7 +137,7 @@ async fn stdio_status_and_wait_preserve_complete_unicode_reports_with_legacy_con
     let guidance = prompt.rsplit_once("</loaded_instructions>\n").unwrap().1;
     let guidance = guidance.split_once("Task follows:\n\n").unwrap().0;
     assert!(guidance.contains("Keep the final report concise"));
-    assert!(!guidance.contains("characters"));
+    assert!(guidance.contains("about 500 characters. This is a soft target, not a limit"));
     for action in ["status", "wait", "report"] {
         let output = Command::new(env!("CARGO_BIN_EXE_agy-delegate-rs"))
             .arg("--config")
